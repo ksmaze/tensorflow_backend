@@ -47,7 +47,7 @@ if(TRITON_TENSORFLOW_PIP_INSTALL AND NOT TRITON_ENABLE_GPU AND TRITON_TENSORFLOW
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
   execute_process(
-    COMMAND ${Python3_EXECUTABLE} -m pip install tensorflow==2.18
+    COMMAND ${Python3_EXECUTABLE} -m pip install tensorflow-cpu==2.18
   )
 
   execute_process(

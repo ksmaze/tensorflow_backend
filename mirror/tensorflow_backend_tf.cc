@@ -28,7 +28,6 @@
 
 #include "tensorflow/c/c_api.h"
 #include "tensorflow/cc/saved_model/loader.h"
-#include "tensorflow/cc/saved_model/tag_constants.h"
 #include "tensorflow/core/common_runtime/device.h"
 #include "tensorflow/core/common_runtime/device_mgr.h"
 #ifdef TRITON_ENABLE_GPU
@@ -968,7 +967,7 @@ TRITONTF_ModelCreateFromSavedModel(
   // default
   std::unordered_set<std::string> saved_model_tags;
   const std::string TAG_TO_USE = (strcmp(graph_tag, "") == 0)
-                                     ? tensorflow::kSavedModelTagServe
+                                     ? std::string("serve")
                                      : graph_tag;
   saved_model_tags.insert(TAG_TO_USE);
 

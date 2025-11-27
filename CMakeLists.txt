@@ -70,6 +70,15 @@ if(TRITON_TENSORFLOW_PIP_INSTALL AND NOT TRITON_ENABLE_GPU AND TRITON_TENSORFLOW
     CACHE PATH "Paths to TensorFlow includes. Multiple paths may be specified by separating them with a semicolon." FORCE
   )
 
+  # When using a pip-installed TensorFlow, the wheel typically only provides
+  # versioned shared libraries (libtensorflow_cc.so.2, libtensorflow_framework.so.2)
+  # without the unversioned .so symlinks. Use the -l:filename syntax so the
+  # linker resolves directly to the .so.2 files.
+  set(
+    TRITON_TENSORFLOW_LDFLAGS
+    "-l:libtensorflow_cc.so.2;-l:libtensorflow_framework.so.2"
+  )
+
   message(STATUS "TRITON_TENSORFLOW_PIP_INSTALL is ON")
   message(STATUS "  tf.sysconfig.get_lib()      = ${_TRITON_TF_LIB}")
   message(STATUS "  tf.sysconfig.get_include() = ${_TRITON_TF_INC}")

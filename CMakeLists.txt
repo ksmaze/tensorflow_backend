@@ -34,13 +34,42 @@ set(TRITON_MIN_CXX_STANDARD 17 CACHE STRING "The minimum C++ standard which feat
 #
 # Options
 #
-option(TRITON_ENABLE_GPU "Enable GPU support in backend." ON)
+option(TRITON_ENABLE_GPU "Enable GPU support in backend." OFF)
 option(TRITON_ENABLE_STATS "Include statistics collections in backend." ON)
 set(TRITON_TENSORFLOW_VERSION "2" CACHE STRING "TensorFlow version, must be '2'. Starting from 23.04, Triton no longer supports Tensorflow 1.")
 set(TRITON_TENSORFLOW_DOCKER_IMAGE "" CACHE STRING "Docker image containing the TensorFlow build required by backend.")
 option(TRITON_TENSORFLOW_INSTALL_EXTRA_DEPS "Install extra dependencies directly into the TensorFlow backend, instead of assuming they are present on the system." OFF)
 set(TRITON_TENSORFLOW_LIB_PATHS "" CACHE PATH "Paths to TensorFlow libraries. Multiple paths may be specified by separating them with a semicolon.")
 set(TRITON_TENSORFLOW_INCLUDE_PATHS "" CACHE PATH "Paths to TensorFlow includes. Multiple paths may be specified by separating them with a semicolon.")
+
+option(TRITON_TENSORFLOW_PIP_INSTALL "Install TensorFlow via pip and auto-detect include/lib paths for CPU-only builds." OFF)
+if(TRITON_TENSORFLOW_PIP_INSTALL AND NOT TRITON_ENABLE_GPU AND TRITON_TENSORFLOW_LIB_PATHS STREQUAL "")
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+  execute_process(
+    COMMAND ${Python3_EXECUTABLE} -m pip install tensorflow==2.18
+  )
+
+  execute_process(
+    COMMAND ${Python3_EXECUTABLE} -c "import tensorflow as tf; print(tf.sysconfig.get_lib())"
+    OUTPUT_VARIABLE _TRITON_TF_LIB
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+  execute_process(
+    COMMAND ${Python3_EXECUTABLE} -c "import tensorflow as tf; print(tf.sysconfig.get_include())"
+    OUTPUT_VARIABLE _TRITON_TF_INC
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+
+  set(
+    TRITON_TENSORFLOW_LIB_PATHS "${_TRITON_TF_LIB}"
+    CACHE PATH "Paths to TensorFlow libraries. Multiple paths may be specified by separating them with a semicolon." FORCE
+  )
+  set(
+    TRITON_TENSORFLOW_INCLUDE_PATHS "${_TRITON_TF_INC}"
+    CACHE PATH "Paths to TensorFlow includes. Multiple paths may be specified by separating them with a semicolon." FORCE
+  )
+endif()
 
 set(TRITON_REPO_ORGANIZATION "https://github.com/triton-inference-server" CACHE STRING "Git repository to pull from")
 set(TRITON_BACKEND_REPO_TAG "main" CACHE STRING "Tag for triton-inference-server/backend repo.")
@@ -186,6 +215,13 @@ add_library(
   src/tensorflow_utils.h
   src/tensorflow_backend_tf.h
 )
+
+if (NOT ${TRITON_TENSORFLOW_DOCKER_BUILD})
+  target_sources(
+    triton-tensorflow-backend
+    PRIVATE mirror/tensorflow_backend_tf.cc
+  )
+endif() # !TRITON_TENSORFLOW_DOCKER_BUILD
 
 add_library(
   TritonTensorFlowBackend::triton-tensorflow-backend ALIAS triton-tensorflow-backend

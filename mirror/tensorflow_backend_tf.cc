@@ -24,16 +24,18 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#include "triton/tensorflow_backend_tf.h"
+#include "tensorflow_backend_tf.h"
 
 #include "tensorflow/c/c_api.h"
 #include "tensorflow/cc/saved_model/loader.h"
 #include "tensorflow/cc/saved_model/tag_constants.h"
 #include "tensorflow/core/common_runtime/device.h"
 #include "tensorflow/core/common_runtime/device_mgr.h"
+#ifdef TRITON_ENABLE_GPU
 #include "tensorflow/core/common_runtime/gpu/gpu_id_utils.h"
 #include "tensorflow/core/common_runtime/gpu/gpu_mem_allocator.h"
 #include "tensorflow/core/common_runtime/gpu/gpu_process_state.h"
+#endif  // TRITON_ENABLE_GPU
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.pb.h"
 #include "tensorflow/core/framework/types.pb.h"
@@ -46,7 +48,9 @@
 #include "tensorflow/core/public/session.h"
 #include "tensorflow/core/public/session_options.h"
 #include "tensorflow/core/util/device_name_utils.h"
+#ifdef TRITON_ENABLE_GPU
 #include "third_party/gpus/cuda/include/cuda_runtime_api.h"
+#endif  // TRITON_ENABLE_GPU
 
 TRITONTF_Error* TRITONTF_ErrorNew(const std::string& str);
 TRITONTF_Shape* TRITONTF_ShapeNew(size_t rank, int64_t* dims);
@@ -373,6 +377,7 @@ TensorImpl::TensorImpl(
     const tensorflow::TensorShape& tfshape, const int tf_gpu_id)
     : name_(name), dtype_(dtype), shape_(shape)
 {
+#ifdef TRITON_ENABLE_GPU
   // Only request for GPU allocator for supported data type
   auto a = ((tf_gpu_id >= 0) && IsGPUFeedAndFetchSupported(dtype))
                ? tensorflow::GPUProcessState::singleton()->GetGPUAllocator(
@@ -384,6 +389,9 @@ TensorImpl::TensorImpl(
   } else {
     tftensor_ = tensorflow::Tensor(a, ConvertDataType(dtype), tfshape);
   }
+#else
+  tftensor_ = tensorflow::Tensor(ConvertDataType(dtype), tfshape);
+#endif  // TRITON_ENABLE_GPU
   Init();
 }
 
@@ -414,10 +422,12 @@ TensorImpl::Init()
     nonstring_base_ = static_cast<char*>(flat.data());
     nonstring_byte_size_ = flat.size();
 
+#ifdef TRITON_ENABLE_GPU
     cudaPointerAttributes attributes;
     cudaError_t err = cudaPointerGetAttributes(&attributes, nonstring_base_);
     gpu_tensor_ =
         ((err == cudaSuccess) && (attributes.type == cudaMemoryTypeDevice));
+#endif  // TRITON_ENABLE_GPU
   }
 }
 

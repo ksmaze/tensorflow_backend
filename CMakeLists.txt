@@ -69,6 +69,12 @@ if(TRITON_TENSORFLOW_PIP_INSTALL AND NOT TRITON_ENABLE_GPU AND TRITON_TENSORFLOW
     TRITON_TENSORFLOW_INCLUDE_PATHS "${_TRITON_TF_INC}"
     CACHE PATH "Paths to TensorFlow includes. Multiple paths may be specified by separating them with a semicolon." FORCE
   )
+
+  message(STATUS "TRITON_TENSORFLOW_PIP_INSTALL is ON")
+  message(STATUS "  tf.sysconfig.get_lib()      = ${_TRITON_TF_LIB}")
+  message(STATUS "  tf.sysconfig.get_include() = ${_TRITON_TF_INC}")
+  message(STATUS "  TRITON_TENSORFLOW_LIB_PATHS     = ${TRITON_TENSORFLOW_LIB_PATHS}")
+  message(STATUS "  TRITON_TENSORFLOW_INCLUDE_PATHS = ${TRITON_TENSORFLOW_INCLUDE_PATHS}")
 endif()
 
 set(TRITON_REPO_ORGANIZATION "https://github.com/triton-inference-server" CACHE STRING "Git repository to pull from")
@@ -268,9 +274,27 @@ set_target_properties(
 )
 
 if (NOT ${TRITON_TENSORFLOW_DOCKER_BUILD})
+  message(STATUS "Configuring non-docker TensorFlow linkage")
+  message(STATUS "  TRITON_TENSORFLOW_LIB_PATHS = ${TRITON_TENSORFLOW_LIB_PATHS}")
+  message(STATUS "  Initial TRITON_TENSORFLOW_LDFLAGS = ${TRITON_TENSORFLOW_LDFLAGS}")
+
   FOREACH(p ${TRITON_TENSORFLOW_LIB_PATHS})
+    message(STATUS "  Adding TensorFlow lib search path: ${p}")
+    file(GLOB _TRITON_TF_LIBS_IN_P
+      "${p}/libtensorflow*.so*"
+      "${p}/libtensorflow*.a"
+    )
+    message(STATUS "    TensorFlow libs found in ${p}: ${_TRITON_TF_LIBS_IN_P}")
+
+    file(GLOB _TRITON_TF_ALL_SO_IN_P
+      "${p}/*.so*"
+    )
+    message(STATUS "    All .so files in ${p}: ${_TRITON_TF_ALL_SO_IN_P}")
+
     set(TRITON_TENSORFLOW_LDFLAGS ${TRITON_TENSORFLOW_LDFLAGS} "-L${p}")
   ENDFOREACH(p)
+
+  message(STATUS "  Final TRITON_TENSORFLOW_LDFLAGS = ${TRITON_TENSORFLOW_LDFLAGS}")
 endif() # !TRITON_TENSORFLOW_DOCKER_BUILD
 
 

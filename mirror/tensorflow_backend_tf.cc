@@ -26,6 +26,14 @@
 
 #include "tensorflow_backend_tf.h"
 
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wignored-qualifiers"
+#elif defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wignored-qualifiers"
+#endif
+
 #include "tensorflow/c/c_api.h"
 #include "tensorflow/cc/saved_model/loader.h"
 #include "tensorflow/core/common_runtime/device.h"
@@ -38,6 +46,92 @@
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.pb.h"
 #include "tensorflow/core/framework/types.pb.h"
+
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#elif defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+
+#ifdef CHECK
+#undef CHECK
+#endif
+#ifdef QCHECK
+#undef QCHECK
+#endif
+#ifdef DCHECK
+#undef DCHECK
+#endif
+#ifdef CHECK_EQ
+#undef CHECK_EQ
+#endif
+#ifdef CHECK_NE
+#undef CHECK_NE
+#endif
+#ifdef CHECK_LE
+#undef CHECK_LE
+#endif
+#ifdef CHECK_LT
+#undef CHECK_LT
+#endif
+#ifdef CHECK_GE
+#undef CHECK_GE
+#endif
+#ifdef CHECK_GT
+#undef CHECK_GT
+#endif
+#ifdef QCHECK_EQ
+#undef QCHECK_EQ
+#endif
+#ifdef QCHECK_NE
+#undef QCHECK_NE
+#endif
+#ifdef QCHECK_LE
+#undef QCHECK_LE
+#endif
+#ifdef QCHECK_LT
+#undef QCHECK_LT
+#endif
+#ifdef QCHECK_GE
+#undef QCHECK_GE
+#endif
+#ifdef QCHECK_GT
+#undef QCHECK_GT
+#endif
+#ifdef DCHECK_EQ
+#undef DCHECK_EQ
+#endif
+#ifdef DCHECK_NE
+#undef DCHECK_NE
+#endif
+#ifdef DCHECK_LE
+#undef DCHECK_LE
+#endif
+#ifdef DCHECK_LT
+#undef DCHECK_LT
+#endif
+#ifdef DCHECK_GE
+#undef DCHECK_GE
+#endif
+#ifdef DCHECK_GT
+#undef DCHECK_GT
+#endif
+#ifdef LOG
+#undef LOG
+#endif
+#ifdef LOG_EVERY_N
+#undef LOG_EVERY_N
+#endif
+#ifdef LOG_FIRST_N
+#undef LOG_FIRST_N
+#endif
+#ifdef LOG_EVERY_POW_2
+#undef LOG_EVERY_POW_2
+#endif
+#ifdef LOG_EVERY_N_SEC
+#undef LOG_EVERY_N_SEC
+#endif
+
 #include "tensorflow/core/graph/default_device.h"
 #include "tensorflow/core/grappler/utils.h"
 #include "tensorflow/core/lib/core/status.h"
@@ -61,9 +155,9 @@ void TRITONTF_IOListDelete(TRITONTF_IOList* list);
 // If TensorFlow status is non-OK, return the equivalent TRITONTF_Error
 #define RETURN_IF_TF_ERROR(TFS)                           \
   do {                                                    \
-    const tensorflow::Status& status__ = (TFS);           \
-    if (status__.code() != 0) {                           \
-      return TRITONTF_ErrorNew(status__.error_message()); \
+    auto status__ = (TFS);                                \
+    if (!status__.ok()) {                                 \
+      return TRITONTF_ErrorNew(status__.ToString());      \
     }                                                     \
   } while (false)
 
@@ -354,7 +448,7 @@ class TensorImpl {
   size_t ByteSize() const { return nonstring_byte_size_; }
   bool IsGPUTensor() const { return gpu_tensor_; }
 
-  const std::string& String(size_t idx) const;
+  const tensorflow::tstring& String(size_t idx) const;
   void SetString(size_t idx, const std::string& str);
 
  private:
@@ -430,17 +524,17 @@ TensorImpl::Init()
   }
 }
 
-const std::string&
+const tensorflow::tstring&
 TensorImpl::String(size_t idx) const
 {
-  auto flat = tftensor_.flat<std::string>();
+  auto flat = tftensor_.flat<tensorflow::tstring>();
   return flat(idx);
 }
 
 void
 TensorImpl::SetString(size_t idx, const std::string& str)
 {
-  auto flat = tftensor_.flat<std::string>();
+  auto flat = tftensor_.flat<tensorflow::tstring>();
   flat(idx) = str;
 }
 
@@ -814,9 +908,9 @@ const char*
 TRITONTF_TensorString(TRITONTF_Tensor* tensor, size_t idx, size_t* length)
 {
   TensorImpl* t = reinterpret_cast<TensorImpl*>(tensor);
-  const std::string& str = t->String(idx);
-  *length = str.length();
-  return str.c_str();
+  const tensorflow::tstring& str = t->String(idx);
+  *length = str.size();
+  return str.data();
 }
 
 void
@@ -1177,7 +1271,7 @@ TRITONTF_ModelInitialize(
     const char** init_operation_names)
 {
   ModelImpl* m = reinterpret_cast<ModelImpl*>(model);
-  for (auto i = 0; i < num_init_operations; i++) {
+  for (size_t i = 0; i < num_init_operations; i++) {
     TRITONTF_Error* err = m->RunOp(init_operation_names[i]);
     if (err != nullptr) {
       return err;
@@ -1198,6 +1292,8 @@ TRITONTF_LoadAndRegisterLibrary(const char* path)
   if (status_code != TF_OK) {
     return TRITONTF_ErrorNew(status_msg);
   }
+
+  TF_DeleteLibraryHandle(lib);
 
   return nullptr;
 }

@@ -26,6 +26,10 @@
 
 #include "tensorflow_backend_tf.h"
 
+// TensorFlow 2.18+ headers (e.g., tensorflow/core/framework/function.h) contain
+// function return types with ignored qualifiers, which triggers
+// -Wignored-qualifiers warnings. Since we compile with -Werror, these warnings
+// become errors. Suppress them around the TensorFlow framework includes.
 #if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wignored-qualifiers"
@@ -53,6 +57,12 @@
 #pragma GCC diagnostic pop
 #endif
 
+// TensorFlow 2.18 headers define logging/check macros in two places:
+// 1. tsl/platform/default/logging.h (pulled in by core framework headers)
+// 2. absl/log/check.h and absl/log/log.h (pulled in by grappler/utils.h)
+// This causes macro redefinition errors with -Werror. Undefine the macros
+// from the first set of includes before including the headers that pull in
+// Abseil's logging, allowing Abseil's definitions to take precedence.
 #ifdef CHECK
 #undef CHECK
 #endif
@@ -152,7 +162,10 @@ TRITONTF_IOList* TRITONTF_IOListNew(
     const char* name, const char* inmodel_name, TRITONTF_IOList* next);
 void TRITONTF_IOListDelete(TRITONTF_IOList* list);
 
-// If TensorFlow status is non-OK, return the equivalent TRITONTF_Error
+// If TensorFlow status is non-OK, return the equivalent TRITONTF_Error.
+// TensorFlow 2.x changed the Status API:
+// - status.code() no longer returns an int comparable to 0; use status.ok()
+// - status.error_message() is removed; use status.ToString() instead
 #define RETURN_IF_TF_ERROR(TFS)                           \
   do {                                                    \
     auto status__ = (TFS);                                \
@@ -448,6 +461,9 @@ class TensorImpl {
   size_t ByteSize() const { return nonstring_byte_size_; }
   bool IsGPUTensor() const { return gpu_tensor_; }
 
+  // TensorFlow 2.x uses tensorflow::tstring instead of std::string for string
+  // tensor elements. Using std::string causes static assertion failures in
+  // tensorflow::DataTypeToEnum<std::string>.
   const tensorflow::tstring& String(size_t idx) const;
   void SetString(size_t idx, const std::string& str);
 
@@ -1058,7 +1074,10 @@ TRITONTF_ModelCreateFromSavedModel(
       new tensorflow::SavedModelBundle);
 
   // If user does not specify a 'tag' in the configuration file, use 'serve' as
-  // default
+  // default. We inline the string "serve" rather than using
+  // tensorflow::kSavedModelTagServe because the header that defines it
+  // (tensorflow/cc/saved_model/tag_constants.h) is not available in the
+  // pip-installed TensorFlow wheel's include directory.
   std::unordered_set<std::string> saved_model_tags;
   const std::string TAG_TO_USE = (strcmp(graph_tag, "") == 0)
                                      ? std::string("serve")
@@ -1271,6 +1290,8 @@ TRITONTF_ModelInitialize(
     const char** init_operation_names)
 {
   ModelImpl* m = reinterpret_cast<ModelImpl*>(model);
+  // Use size_t for loop variable to match num_init_operations type and avoid
+  // signed/unsigned comparison warning (-Wsign-compare) with -Werror.
   for (size_t i = 0; i < num_init_operations; i++) {
     TRITONTF_Error* err = m->RunOp(init_operation_names[i]);
     if (err != nullptr) {
@@ -1293,6 +1314,8 @@ TRITONTF_LoadAndRegisterLibrary(const char* path)
     return TRITONTF_ErrorNew(status_msg);
   }
 
+  // Delete the library handle to avoid unused variable warning (-Wunused-variable)
+  // with -Werror. The library remains loaded in the process.
   TF_DeleteLibraryHandle(lib);
 
   return nullptr;

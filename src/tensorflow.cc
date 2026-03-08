@@ -1934,6 +1934,7 @@ ModelInstanceState::ProcessRequests(
   // execution. The batch-size, number of inputs, and size of each
   // input has already been checked so don't need to do that here.
   size_t total_batch_size = 0;
+  std::vector<int64_t> request_batch_sizes(request_count, 1);
   for (size_t i = 0; i < request_count; i++) {
     // If we get a nullptr request then something is badly wrong. Fail
     // and release all requests.
@@ -1960,6 +1961,7 @@ ModelInstanceState::ProcessRequests(
         err = TRITONBACKEND_InputProperties(
             input, nullptr, nullptr, &shape, nullptr, nullptr, nullptr);
         total_batch_size += shape[0];
+        request_batch_sizes[i] = shape[0];
       }
       if (err != nullptr) {
         RequestsRespondWithError(requests, request_count, err);
@@ -2266,8 +2268,8 @@ ModelInstanceState::ProcessRequests(
 
   // Collect the names of requested outputs. Do not include outputs
   // for requests that have already responded with an error.
-  std::set<std::string> required_outputs;
-  std::vector<std::set<std::string>> request_required_outputs(request_count);
+  std::vector<std::string> required_outputs;
+  std::vector<std::vector<const char*>> request_required_outputs(request_count);
   for (size_t idx = 0; idx < request_count; idx++) {
     const auto& request = requests[idx];
     auto& response = responses[idx];
@@ -2276,14 +2278,17 @@ ModelInstanceState::ProcessRequests(
       RESPOND_AND_SET_NULL_IF_ERROR(
           &response, TRITONBACKEND_RequestOutputCount(request, &output_count));
       if (response != nullptr) {
+        request_required_outputs[idx].reserve(output_count);
         for (uint32_t output_idx = 0; output_idx < output_count; output_idx++) {
           const char* output_name;
           RESPOND_AND_SET_NULL_IF_ERROR(
               &response, TRITONBACKEND_RequestOutputName(
                              request, output_idx, &output_name));
           if (response != nullptr) {
-            required_outputs.insert(output_name);
-            request_required_outputs[idx].insert(output_name);
+            if (std::find(required_outputs.begin(), required_outputs.end(), output_name) == required_outputs.end()) {
+              required_outputs.emplace_back(output_name);
+            }
+            request_required_outputs[idx].push_back(output_name);
           }
         }
       }
@@ -2293,6 +2298,7 @@ ModelInstanceState::ProcessRequests(
   // Create the vector of required output names using the names
   // expected by the model.
   std::vector<std::string> model_output_names;
+  model_output_names.reserve(required_outputs.size());
   const char* output_names_cstr[required_outputs.size()];
   {
     size_t oidx = 0;
@@ -2397,20 +2403,14 @@ ModelInstanceState::ProcessRequests(
             auto& response = responses[idx];
 
             if (max_batch_size != 0) {
-              // [TODO] remember some input properties on the first call
-              TRITONBACKEND_Input* input;
-              TRITONBACKEND_RequestInputByIndex(request, 0 /* index*/, &input);
-              const int64_t* shape;
-              TRITONBACKEND_InputProperties(
-                  input, nullptr, nullptr, &shape, nullptr, nullptr, nullptr);
-              batchn_shape[0] = shape[0];
+              batchn_shape[0] = request_batch_sizes[idx];
             }
 
             const size_t tensor_element_cnt = GetElementCount(batchn_shape);
 
             // Only need an response tensor for requested outputs.
             if ((response != nullptr) &&
-                (request_required_outputs[idx].find(name) !=
+                (std::find(request_required_outputs[idx].begin(), request_required_outputs[idx].end(), name) !=
                  request_required_outputs[idx].end())) {
               TRITONBACKEND_Output* response_output;
               RESPOND_AND_SET_NULL_IF_ERROR(

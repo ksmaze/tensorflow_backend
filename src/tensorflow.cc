@@ -2269,7 +2269,7 @@ ModelInstanceState::ProcessRequests(
   // Collect the names of requested outputs. Do not include outputs
   // for requests that have already responded with an error.
   std::vector<std::string> required_outputs;
-  std::vector<std::vector<const char*>> request_required_outputs(request_count);
+  std::vector<std::vector<uint32_t>> request_required_outputs(request_count);
   for (size_t idx = 0; idx < request_count; idx++) {
     const auto& request = requests[idx];
     auto& response = responses[idx];
@@ -2285,10 +2285,15 @@ ModelInstanceState::ProcessRequests(
               &response, TRITONBACKEND_RequestOutputName(
                              request, output_idx, &output_name));
           if (response != nullptr) {
-            if (std::find(required_outputs.begin(), required_outputs.end(), output_name) == required_outputs.end()) {
+            auto it = std::find(required_outputs.begin(), required_outputs.end(), output_name);
+            uint32_t req_out_idx;
+            if (it == required_outputs.end()) {
+              req_out_idx = required_outputs.size();
               required_outputs.emplace_back(output_name);
+            } else {
+              req_out_idx = std::distance(required_outputs.begin(), it);
             }
-            request_required_outputs[idx].push_back(output_name);
+            request_required_outputs[idx].push_back(req_out_idx);
           }
         }
       }
@@ -2367,12 +2372,14 @@ ModelInstanceState::ProcessRequests(
   // ourselves since we must use TF-specific string tensor APIs.
   cuda_copy = false;
   // The serialized string buffer must be valid until output copies are done
-  std::vector<std::unique_ptr<std::string>> string_buffer;
+  std::vector<std::string> string_buffer;
+  string_buffer.reserve(request_count * model_output_names.size());
   BackendOutputResponder responder(
       requests, request_count, &responses,
       StateForModel()->TritonMemoryManager(), max_batch_size > 0,
       StateForModel()->EnablePinnedOutput(), CudaStream());
   {
+    uint32_t out_idx = 0;
     TRITONTF_TensorList* output_tensor_itr = output_tensors.get();
     for (const auto& name : model_output_names) {
       TRITONTF_Tensor* output_tensor = output_tensor_itr->tensor_;
@@ -2399,7 +2406,6 @@ ModelInstanceState::ProcessRequests(
           size_t tensor_offset = 0;
 
           for (size_t idx = 0; idx < responses.size(); idx++) {
-            auto& request = requests[idx];
             auto& response = responses[idx];
 
             if (max_batch_size != 0) {
@@ -2409,19 +2415,27 @@ ModelInstanceState::ProcessRequests(
             const size_t tensor_element_cnt = GetElementCount(batchn_shape);
 
             // Only need an response tensor for requested outputs.
-            if ((response != nullptr) &&
-                (std::find(request_required_outputs[idx].begin(), request_required_outputs[idx].end(), name) !=
-                 request_required_outputs[idx].end())) {
+            bool is_requested = false;
+            if (response != nullptr) {
+              for (auto req_out_idx : request_required_outputs[idx]) {
+                if (req_out_idx == out_idx) {
+                  is_requested = true;
+                  break;
+                }
+              }
+            }
+
+            if (is_requested) {
               TRITONBACKEND_Output* response_output;
               RESPOND_AND_SET_NULL_IF_ERROR(
                   &response,
                   TRITONBACKEND_ResponseOutput(
                       response, &response_output, name.c_str(), datatype,
                       batchn_shape.data(), batchn_shape.size()));
-              string_buffer.emplace_back(new std::string());
+              string_buffer.emplace_back();
               cuda_copy |= SetStringOutputBuffer(
                   output_tensor, &response, response_output, tensor_element_cnt,
-                  tensor_offset, CudaStream(), string_buffer.back().get());
+                  tensor_offset, CudaStream(), &string_buffer.back());
             }
 
             tensor_offset += tensor_element_cnt;
@@ -2453,6 +2467,7 @@ ModelInstanceState::ProcessRequests(
               .c_str());
 
       output_tensor_itr = output_tensor_itr->next_;
+      out_idx++;
     }
 
     // Finalize and wait for any pending buffer copies.

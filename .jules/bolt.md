@@ -1,0 +1,3 @@
+## 2024-03-09 - [Triton Output Resolution Hot Path]
+**Learning:** `std::find` was checking if an output `const char*` was requested by searching an array using string comparisons inside the per-request output execution loop. Also, dynamically allocating a `new std::string()` for every request and string output tensor was happening on the hot path.
+**Action:** Replaced the string comparison loop with an index array (`std::vector<uint32_t> request_required_outputs`) that performs integer comparisons. Pre-reserved `std::vector<std::string>` to securely place strings on a stable buffer array without needing `std::unique_ptr` dynamic allocations per-request, preventing CUDA async pointer invalidation and eliminating multiple `O(N * M)` heap allocations per execute call.

@@ -1,0 +1,167 @@
+<<<<<<< SEARCH
+  std::vector<std::string> required_outputs;
+  std::vector<std::vector<const char*>> request_required_outputs(request_count);
+  for (size_t idx = 0; idx < request_count; idx++) {
+    const auto& request = requests[idx];
+    auto& response = responses[idx];
+    if (response != nullptr) {
+      uint32_t output_count;
+      RESPOND_AND_SET_NULL_IF_ERROR(
+          &response, TRITONBACKEND_RequestOutputCount(request, &output_count));
+      if (response != nullptr) {
+        request_required_outputs[idx].reserve(output_count);
+        for (uint32_t output_idx = 0; output_idx < output_count; output_idx++) {
+          const char* output_name;
+          RESPOND_AND_SET_NULL_IF_ERROR(
+              &response, TRITONBACKEND_RequestOutputName(
+                             request, output_idx, &output_name));
+          if (response != nullptr) {
+            if (std::find(required_outputs.begin(), required_outputs.end(), output_name) == required_outputs.end()) {
+              required_outputs.emplace_back(output_name);
+            }
+            request_required_outputs[idx].push_back(output_name);
+          }
+        }
+      }
+    }
+  }
+=======
+  std::vector<std::string> required_outputs;
+  std::vector<std::vector<uint32_t>> request_required_outputs(request_count);
+  for (size_t idx = 0; idx < request_count; idx++) {
+    const auto& request = requests[idx];
+    auto& response = responses[idx];
+    if (response != nullptr) {
+      uint32_t output_count;
+      RESPOND_AND_SET_NULL_IF_ERROR(
+          &response, TRITONBACKEND_RequestOutputCount(request, &output_count));
+      if (response != nullptr) {
+        request_required_outputs[idx].reserve(output_count);
+        for (uint32_t output_idx = 0; output_idx < output_count; output_idx++) {
+          const char* output_name;
+          RESPOND_AND_SET_NULL_IF_ERROR(
+              &response, TRITONBACKEND_RequestOutputName(
+                             request, output_idx, &output_name));
+          if (response != nullptr) {
+            auto it = std::find(required_outputs.begin(), required_outputs.end(), output_name);
+            uint32_t req_out_idx;
+            if (it == required_outputs.end()) {
+              req_out_idx = required_outputs.size();
+              required_outputs.emplace_back(output_name);
+            } else {
+              req_out_idx = std::distance(required_outputs.begin(), it);
+            }
+            request_required_outputs[idx].push_back(req_out_idx);
+          }
+        }
+      }
+    }
+  }
+>>>>>>> REPLACE
+<<<<<<< SEARCH
+  // The serialized string buffer must be valid until output copies are done
+  std::vector<std::unique_ptr<std::string>> string_buffer;
+  BackendOutputResponder responder(
+      requests, request_count, &responses,
+      StateForModel()->TritonMemoryManager(), max_batch_size > 0,
+      StateForModel()->EnablePinnedOutput(), CudaStream());
+  {
+    TRITONTF_TensorList* output_tensor_itr = output_tensors.get();
+    for (const auto& name : model_output_names) {
+=======
+  // The serialized string buffer must be valid until output copies are done
+  std::vector<std::string> string_buffer;
+  string_buffer.reserve(request_count * model_output_names.size());
+  BackendOutputResponder responder(
+      requests, request_count, &responses,
+      StateForModel()->TritonMemoryManager(), max_batch_size > 0,
+      StateForModel()->EnablePinnedOutput(), CudaStream());
+  {
+    uint32_t out_idx = 0;
+    TRITONTF_TensorList* output_tensor_itr = output_tensors.get();
+    for (const auto& name : model_output_names) {
+>>>>>>> REPLACE
+<<<<<<< SEARCH
+            // Only need an response tensor for requested outputs.
+            if ((response != nullptr) &&
+                (std::find(request_required_outputs[idx].begin(), request_required_outputs[idx].end(), name) !=
+                 request_required_outputs[idx].end())) {
+              TRITONBACKEND_Output* response_output;
+              RESPOND_AND_SET_NULL_IF_ERROR(
+                  &response,
+                  TRITONBACKEND_ResponseOutput(
+                      response, &response_output, name.c_str(), datatype,
+                      batchn_shape.data(), batchn_shape.size()));
+              string_buffer.emplace_back(new std::string());
+              cuda_copy |= SetStringOutputBuffer(
+                  output_tensor, &response, response_output, tensor_element_cnt,
+                  tensor_offset, CudaStream(), string_buffer.back().get());
+            }
+
+            tensor_offset += tensor_element_cnt;
+          }
+        }
+        // Use the responder for non-STRING datatype...
+        else {  // datatype != DataType::TYPE_STRING
+          responder.ProcessTensor(
+=======
+            // Only need an response tensor for requested outputs.
+            bool is_requested = false;
+            if (response != nullptr) {
+              for (auto req_out_idx : request_required_outputs[idx]) {
+                if (req_out_idx == out_idx) {
+                  is_requested = true;
+                  break;
+                }
+              }
+            }
+
+            if (is_requested) {
+              TRITONBACKEND_Output* response_output;
+              RESPOND_AND_SET_NULL_IF_ERROR(
+                  &response,
+                  TRITONBACKEND_ResponseOutput(
+                      response, &response_output, name.c_str(), datatype,
+                      batchn_shape.data(), batchn_shape.size()));
+              string_buffer.emplace_back();
+              cuda_copy |= SetStringOutputBuffer(
+                  output_tensor, &response, response_output, tensor_element_cnt,
+                  tensor_offset, CudaStream(), &string_buffer.back());
+            }
+
+            tensor_offset += tensor_element_cnt;
+          }
+        }
+        // Use the responder for non-STRING datatype...
+        else {  // datatype != DataType::TYPE_STRING
+          // For non-STRING, the responder automatically handles ignoring outputs
+          // that are not requested, so we don't need to check here. But we pass
+          // the entire tensor down to ProcessTensor anyway.
+          responder.ProcessTensor(
+>>>>>>> REPLACE
+<<<<<<< SEARCH
+      LOG_MESSAGE(
+          TRITONSERVER_LOG_VERBOSE,
+          (std::string("TRITONBACKEND_ModelExecute: output '") + name +
+           "' is GPU tensor: " +
+           ((TRITONTF_TensorIsGPUTensor(output_tensor)) ? "true" : "false"))
+              .c_str());
+
+      output_tensor_itr = output_tensor_itr->next_;
+    }
+
+    // Finalize and wait for any pending buffer copies.
+=======
+      LOG_MESSAGE(
+          TRITONSERVER_LOG_VERBOSE,
+          (std::string("TRITONBACKEND_ModelExecute: output '") + name +
+           "' is GPU tensor: " +
+           ((TRITONTF_TensorIsGPUTensor(output_tensor)) ? "true" : "false"))
+              .c_str());
+
+      output_tensor_itr = output_tensor_itr->next_;
+      out_idx++;
+    }
+
+    // Finalize and wait for any pending buffer copies.
+>>>>>>> REPLACE

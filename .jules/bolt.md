@@ -5,3 +5,7 @@
 ## 2023-10-27 - [Hidden Vector Allocations in ProcessRequests]
 **Learning:** Found a performance bottleneck in the `ProcessRequests` hot-path. Unnecessary internal memory allocations were made due to repeated implicit temporary `std::string` copies when calling `std::find(required_outputs.begin(), required_outputs.end(), const char*)`. The `batchn_shape` vector was also needlessly allocated and reallocated inside a loop iteration. The 2D vector `request_required_outputs` resulted in O(N) allocations for small dynamic collections.
 **Action:** Next time, avoid implicitly constructing short-lived temporaries like `std::string` in hot loops. Preallocate linear containers outside loops via `assign()` or `clear()` to reuse capacity. Flatten vector-of-vectors to reduce dynamic heap allocations in favor of contiguous memory caches.
+
+## 2024-03-10 - [Avoid VLA and String Allocations in Output Request Iteration]
+**Learning:** Non-standard variable-length arrays (VLAs) (`const char* output_names_cstr[required_outputs.size()]`) were being used, and multiple `std::string` objects were instantiated redundantly inside the outputs loop just to hold the names to find in `model_.output_name_map_`.
+**Action:** Always replace VLAs with `std::vector` to be standard compliant and avoid stack overflow issues. Furthermore, you can search `IONameMap` directly with `const char*` or cache `const char*` pointers inside the pre-allocated `std::vector<const char*> output_names_cstr` to eliminate dynamic allocations inside the loop.

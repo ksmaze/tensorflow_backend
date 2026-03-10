@@ -2052,6 +2052,7 @@ ModelInstanceState::ProcessRequests(
     // request as the representative for the input tensors.
     uint32_t input_count;
     TRITONBACKEND_RequestInputCount(requests[0], &input_count);
+    std::vector<int64_t> batchn_shape;
     for (uint32_t input_idx = 0; input_idx < input_count; input_idx++) {
       TRITONBACKEND_Input* input;
       TRITONBACKEND_RequestInputByIndex(requests[0], input_idx, &input);
@@ -2062,11 +2063,11 @@ ModelInstanceState::ProcessRequests(
       TRITONBACKEND_InputProperties(
           input, &name, &datatype, &shape, &dims_count, nullptr, nullptr);
 
-      std::vector<int64_t> batchn_shape;
+      batchn_shape.clear();
       // For a ragged input tensor, the tensor shape should be
       // the flatten shape of the whole batch
       if (StateForModel()->IsInputRagged(name)) {
-        batchn_shape = std::vector<int64_t>{0};
+        batchn_shape.push_back(0);
         for (size_t idx = 0; idx < request_count; idx++) {
           TRITONBACKEND_Input* input;
           RESPOND_AND_SET_NULL_IF_ERROR(
@@ -2084,7 +2085,7 @@ ModelInstanceState::ProcessRequests(
       }
       // The shape for the entire input patch, [total_batch_size, ...]
       else {
-        batchn_shape = std::vector<int64_t>(shape, shape + dims_count);
+        batchn_shape.assign(shape, shape + dims_count);
         if (max_batch_size != 0) {
           batchn_shape[0] = total_batch_size;
         }
@@ -2314,21 +2315,16 @@ ModelInstanceState::ProcessRequests(
 
   // Create the vector of required output names using the names
   // expected by the model.
-  std::vector<std::string> model_output_names;
-  model_output_names.reserve(required_outputs.size());
-  const char* output_names_cstr[required_outputs.size()];
+  std::vector<const char*> output_names_cstr;
+  output_names_cstr.reserve(required_outputs.size());
   {
-    size_t oidx = 0;
     for (const char* name : required_outputs) {
-      std::string name_str(name);
-      model_output_names.push_back(name_str);
-      const auto& tn_itr = model_.output_name_map_.find(name_str);
+      const auto& tn_itr = model_.output_name_map_.find(name);
       if (tn_itr == model_.output_name_map_.end()) {
-        output_names_cstr[oidx] = model_output_names.back().c_str();
+        output_names_cstr.push_back(name);
       } else {
-        output_names_cstr[oidx] = tn_itr->second.c_str();
+        output_names_cstr.push_back(tn_itr->second.c_str());
       }
-      oidx++;
     }
   }
 
@@ -2351,7 +2347,7 @@ ModelInstanceState::ProcessRequests(
 
     TRITONTF_Error* tf_err = TRITONTF_ModelRun(
         model_.tritontf_model_.get(), *(input_tensors.release()),
-        required_outputs.size(), output_names_cstr, &rtl);
+        required_outputs.size(), output_names_cstr.data(), &rtl);
     if (tf_err != nullptr) {
       auto err =
           TRITONSERVER_ErrorNew(TRITONSERVER_ERROR_INTERNAL, tf_err->msg_);
@@ -2386,7 +2382,7 @@ ModelInstanceState::ProcessRequests(
   cuda_copy = false;
   // The serialized string buffer must be valid until output copies are done
   std::vector<std::string> string_buffer;
-  string_buffer.reserve(request_count * model_output_names.size());
+  string_buffer.reserve(request_count * required_outputs.size());
   BackendOutputResponder responder(
       requests, request_count, &responses,
       StateForModel()->TritonMemoryManager(), max_batch_size > 0,
@@ -2400,7 +2396,7 @@ ModelInstanceState::ProcessRequests(
     // output.
     std::vector<int64_t> batchn_shape;
 
-    for (const auto& name : model_output_names) {
+    for (const char* name : required_outputs) {
       TRITONTF_Tensor* output_tensor = output_tensor_itr->tensor_;
 
       const BatchOutput* batch_output = StateForModel()->FindBatchOutput(name);
@@ -2443,7 +2439,7 @@ ModelInstanceState::ProcessRequests(
               RESPOND_AND_SET_NULL_IF_ERROR(
                   &response,
                   TRITONBACKEND_ResponseOutput(
-                      response, &response_output, name.c_str(), datatype,
+                      response, &response_output, name, datatype,
                       batchn_shape.data(), batchn_shape.size()));
               string_buffer.emplace_back();
               cuda_copy |= SetStringOutputBuffer(

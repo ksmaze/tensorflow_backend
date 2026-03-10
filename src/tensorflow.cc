@@ -2268,8 +2268,14 @@ ModelInstanceState::ProcessRequests(
 
   // Collect the names of requested outputs. Do not include outputs
   // for requests that have already responded with an error.
-  std::vector<std::string> required_outputs;
-  std::vector<std::vector<uint32_t>> request_required_outputs(request_count);
+  std::vector<const char*> required_outputs;
+  std::vector<uint32_t> request_required_outputs;
+  std::vector<uint32_t> request_outputs_start(request_count);
+  std::vector<uint32_t> request_outputs_count(request_count);
+
+  // Pre-allocate to prevent frequent re-allocations.
+  request_required_outputs.reserve(request_count * 4); // Guess 4 outputs per request avg
+
   for (size_t idx = 0; idx < request_count; idx++) {
     const auto& request = requests[idx];
     auto& response = responses[idx];
@@ -2278,22 +2284,28 @@ ModelInstanceState::ProcessRequests(
       RESPOND_AND_SET_NULL_IF_ERROR(
           &response, TRITONBACKEND_RequestOutputCount(request, &output_count));
       if (response != nullptr) {
-        request_required_outputs[idx].reserve(output_count);
+        request_outputs_start[idx] = request_required_outputs.size();
+        request_outputs_count[idx] = 0;
         for (uint32_t output_idx = 0; output_idx < output_count; output_idx++) {
           const char* output_name;
           RESPOND_AND_SET_NULL_IF_ERROR(
               &response, TRITONBACKEND_RequestOutputName(
                              request, output_idx, &output_name));
           if (response != nullptr) {
-            auto it = std::find(required_outputs.begin(), required_outputs.end(), output_name);
-            uint32_t req_out_idx;
-            if (it == required_outputs.end()) {
-              req_out_idx = required_outputs.size();
-              required_outputs.emplace_back(output_name);
-            } else {
-              req_out_idx = std::distance(required_outputs.begin(), it);
+            uint32_t req_out_idx = required_outputs.size();
+            bool found = false;
+            for (uint32_t ro_idx = 0; ro_idx < required_outputs.size(); ++ro_idx) {
+              if (std::strcmp(required_outputs[ro_idx], output_name) == 0) {
+                req_out_idx = ro_idx;
+                found = true;
+                break;
+              }
             }
-            request_required_outputs[idx].push_back(req_out_idx);
+            if (!found) {
+              required_outputs.push_back(output_name);
+            }
+            request_required_outputs.push_back(req_out_idx);
+            request_outputs_count[idx]++;
           }
         }
       }
@@ -2307,11 +2319,12 @@ ModelInstanceState::ProcessRequests(
   const char* output_names_cstr[required_outputs.size()];
   {
     size_t oidx = 0;
-    for (const auto& name : required_outputs) {
-      model_output_names.push_back(name);
-      const auto& tn_itr = model_.output_name_map_.find(name);
+    for (const char* name : required_outputs) {
+      std::string name_str(name);
+      model_output_names.push_back(name_str);
+      const auto& tn_itr = model_.output_name_map_.find(name_str);
       if (tn_itr == model_.output_name_map_.end()) {
-        output_names_cstr[oidx] = name.c_str();
+        output_names_cstr[oidx] = model_output_names.back().c_str();
       } else {
         output_names_cstr[oidx] = tn_itr->second.c_str();
       }
@@ -2381,6 +2394,12 @@ ModelInstanceState::ProcessRequests(
   {
     uint32_t out_idx = 0;
     TRITONTF_TensorList* output_tensor_itr = output_tensors.get();
+
+    // batchn_shape holds the shape of the entire tensor batch, but
+    // is overwritten below and used as the shape for each response
+    // output.
+    std::vector<int64_t> batchn_shape;
+
     for (const auto& name : model_output_names) {
       TRITONTF_Tensor* output_tensor = output_tensor_itr->tensor_;
 
@@ -2391,15 +2410,7 @@ ModelInstanceState::ProcessRequests(
 
         const TRITONSERVER_DataType datatype = ConvertDataType(tf_datatype);
 
-        // batchn_shape holds the shape of the entire tensor batch, but
-        // is overwritten below and used as the shape for each response
-        // output.
-        std::vector<int64_t> batchn_shape;
-        batchn_shape.reserve(tf_shape->rank_);
-        for (size_t itr = 0; itr < tf_shape->rank_; itr++) {
-          const int64_t dim = tf_shape->dims_[itr];
-          batchn_shape.push_back(dim);
-        }
+        batchn_shape.assign(tf_shape->dims_, tf_shape->dims_ + tf_shape->rank_);
 
         // Custom handling for string/bytes tensor...
         if (datatype == TRITONSERVER_TYPE_BYTES) {
@@ -2417,8 +2428,10 @@ ModelInstanceState::ProcessRequests(
             // Only need an response tensor for requested outputs.
             bool is_requested = false;
             if (response != nullptr) {
-              for (auto req_out_idx : request_required_outputs[idx]) {
-                if (req_out_idx == out_idx) {
+              uint32_t start_idx = request_outputs_start[idx];
+              uint32_t count = request_outputs_count[idx];
+              for (uint32_t i = 0; i < count; ++i) {
+                if (request_required_outputs[start_idx + i] == out_idx) {
                   is_requested = true;
                   break;
                 }

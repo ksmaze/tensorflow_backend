@@ -455,7 +455,7 @@ class TensorImpl {
   // tensor elements. Using std::string causes static assertion failures in
   // tensorflow::DataTypeToEnum<std::string>.
   const tensorflow::tstring& String(size_t idx) const;
-  void SetString(size_t idx, const std::string& str);
+  void SetString(size_t idx, const char* cstr, size_t length);
 
  private:
   void Init();
@@ -469,7 +469,6 @@ class TensorImpl {
   size_t nonstring_byte_size_;
   bool gpu_tensor_;
 };
-
 
 TensorImpl::TensorImpl(
     const char* name, TRITONTF_DataType dtype, TRITONTF_Shape* shape,
@@ -538,10 +537,14 @@ TensorImpl::String(size_t idx) const
 }
 
 void
-TensorImpl::SetString(size_t idx, const std::string& str)
+TensorImpl::SetString(size_t idx, const char* cstr, size_t length)
 {
   auto flat = tftensor_.flat<tensorflow::tstring>();
-  flat(idx) = str;
+  if ((cstr == nullptr) || (length == 0)) {
+    flat(idx).clear();
+  } else {
+    flat(idx).assign(cstr, length);
+  }
 }
 
 //
@@ -647,9 +650,18 @@ ModelImpl::Run(
     const std::vector<std::string>& output_names,
     TRITONTF_TensorList** output_tensors)
 {
+  size_t input_count = 0;
+  for (TRITONTF_TensorList* itr = input_tensors; itr != nullptr;
+       itr = itr->next_) {
+    if (itr->tensor_ != nullptr) {
+      ++input_count;
+    }
+  }
+
   // I/O needs to be prepared differently for callable
   if (has_callable_) {
     std::vector<tensorflow::Tensor> tfinputs;
+    tfinputs.reserve(input_count);
 
     for (TRITONTF_TensorList* itr = input_tensors; itr != nullptr;
          itr = itr->next_) {
@@ -680,13 +692,13 @@ ModelImpl::Run(
     // https://github.com/tensorflow/tensorflow/blob/master/tensorflow/core/common_runtime/executor.cc#L2578
   } else {
     std::vector<std::pair<std::string, tensorflow::Tensor>> tfinputs;
+    tfinputs.reserve(input_count);
 
     for (TRITONTF_TensorList* itr = input_tensors; itr != nullptr;
          itr = itr->next_) {
       if (itr->tensor_ != nullptr) {
         TensorImpl* tensor = reinterpret_cast<TensorImpl*>(itr->tensor_);
-        tfinputs.emplace_back(
-            std::make_pair(tensor->Name(), std::move(tensor->TFTensor())));
+        tfinputs.emplace_back(tensor->Name(), std::move(tensor->TFTensor()));
       }
     }
     TRITONTF_TensorListDelete(input_tensors);
@@ -924,12 +936,7 @@ TRITONTF_TensorSetString(
     TRITONTF_Tensor* tensor, size_t idx, const char* cstr, size_t length)
 {
   TensorImpl* t = reinterpret_cast<TensorImpl*>(tensor);
-  std::string str;
-  if (cstr != nullptr) {
-    str = std::string(cstr, length);
-  }
-
-  t->SetString(idx, str);
+  t->SetString(idx, cstr, length);
 }
 
 //
@@ -1267,6 +1274,7 @@ TRITONTF_ModelRun(
   ModelImpl* m = reinterpret_cast<ModelImpl*>(model);
 
   std::vector<std::string> output_tensor_names;
+  output_tensor_names.reserve(num_outputs);
   for (size_t i = 0; i < num_outputs; ++i) {
     output_tensor_names.emplace_back(output_names[i]);
   }

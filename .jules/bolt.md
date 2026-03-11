@@ -9,3 +9,11 @@
 ## 2024-03-10 - [Avoid VLA and String Allocations in Output Request Iteration]
 **Learning:** Non-standard variable-length arrays (VLAs) (`const char* output_names_cstr[required_outputs.size()]`) were being used, and multiple `std::string` objects were instantiated redundantly inside the outputs loop just to hold the names to find in `model_.output_name_map_`.
 **Action:** Always replace VLAs with `std::vector` to be standard compliant and avoid stack overflow issues. Furthermore, you can search `IONameMap` directly with `const char*` or cache `const char*` pointers inside the pre-allocated `std::vector<const char*> output_names_cstr` to eliminate dynamic allocations inside the loop.
+
+## 2024-05-19 - Removed String Allocation Overhead in Hot Path
+**Learning:** `std::unordered_map` with `std::string` keys requires constructing a `std::string` for queries using `const char*` prior to C++20 transparent comparisons. In Triton, tensors names are queried as `const char*` during `ProcessRequests`.
+**Action:** Replaced `std::unordered_map` with a custom `std::vector<std::pair<std::string, std::string>>` and linear search on `const char*` directly. Since the number of inputs/outputs per model is extremely small (<10), linear search is significantly more cache friendly and removes heap allocations entirely.
+
+## 2024-05-19 - Fast Lookups for Large Tensor Counts without Allocation
+**Learning:** Some models can have up to ~800 inputs/outputs. A linear search on `std::vector` isn't scalable enough, but using `std::unordered_map` with `std::string` allocates heap memory when queried with `const char*` due to lack of transparent comparators.
+**Action:** By maintaining a sorted `std::vector` and using `std::lower_bound` combined with a custom lambda comparing `a.first.c_str()` to the searched `const char*` using `std::strcmp(..., ...) < 0`, we achieve both `O(log N)` lookup times and zero `std::string` allocations!

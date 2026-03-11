@@ -252,15 +252,17 @@ target_include_directories(
 if (NOT ${TRITON_TENSORFLOW_DOCKER_BUILD})
   target_include_directories(
     triton-tensorflow-backend
-    PRIVATE ${TRITON_TENSORFLOW_INCLUDE_PATHS}
+    SYSTEM PRIVATE ${TRITON_TENSORFLOW_INCLUDE_PATHS}
   )
 endif() # !TRITON_TENSORFLOW_DOCKER_BUILD
 
 target_compile_features(triton-tensorflow-backend PRIVATE cxx_std_${TRITON_MIN_CXX_STANDARD})
 target_compile_options(
   triton-tensorflow-backend PRIVATE
-  $<$<OR:$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>,$<CXX_COMPILER_ID:GNU>>:
-    -Wall -Wextra -Wno-unused-parameter -Wno-type-limits -Werror>
+  $<$<OR:$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>>:
+    -Wall -Wextra -Wno-unused-parameter -Wno-type-limits -Wno-deprecated-declarations -Wno-sign-compare -Werror>
+  $<$<CXX_COMPILER_ID:GNU>:
+    -Wall -Wextra -Wno-unused-parameter -Wno-type-limits -Wno-deprecated-declarations -Wno-sign-compare -Wno-interference-size -Werror>
 )
 
 # C/C++ defines that are used directly by this backend.

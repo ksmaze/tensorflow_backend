@@ -53,7 +53,58 @@ namespace triton { namespace backend { namespace tensorflow {
 using cudaStream_t = void*;
 #endif  // !TRITON_ENABLE_GPU
 
-using IONameMap = std::unordered_map<std::string, std::string>;
+struct IONameMap {
+  using value_type = std::pair<std::string, std::string>;
+  using container_type = std::vector<value_type>;
+  using iterator = container_type::iterator;
+  using const_iterator = container_type::const_iterator;
+
+  container_type map_;
+
+  std::pair<iterator, bool> insert(const value_type& p) {
+    auto it = std::lower_bound(
+        map_.begin(), map_.end(), p.first,
+        [](const value_type& a, const std::string& b) {
+          return a.first < b;
+        });
+    if (it != map_.end() && it->first == p.first) {
+      return {it, false};
+    } else {
+      auto new_it = map_.insert(it, p);
+      return {new_it, true};
+    }
+  }
+
+  const_iterator find(const char* name) const {
+    if (name == nullptr) return end();
+    auto it = std::lower_bound(
+        map_.begin(), map_.end(), name,
+        [](const value_type& a, const char* b) {
+          return std::strcmp(a.first.c_str(), b) < 0;
+        });
+    if (it != map_.end() && it->first == name) {
+      return it;
+    }
+    return end();
+  }
+
+  const_iterator find(const std::string& name) const {
+    return find(name.c_str());
+  }
+
+  iterator begin() { return map_.begin(); }
+  const_iterator begin() const { return map_.begin(); }
+  const_iterator cbegin() const { return map_.cbegin(); }
+
+  iterator end() { return map_.end(); }
+  const_iterator end() const { return map_.end(); }
+  const_iterator cend() const { return map_.cend(); }
+
+  size_t size() const { return map_.size(); }
+  bool empty() const { return map_.empty(); }
+  void clear() { map_.clear(); }
+};
+
 using TRITONTFModelHandle = std::shared_ptr<TRITONTF_Model>;
 
 // BackendConfiguration

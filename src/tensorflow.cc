@@ -53,14 +53,6 @@ namespace triton { namespace backend { namespace tensorflow {
 using cudaStream_t = void*;
 #endif  // !TRITON_ENABLE_GPU
 
-// ⚡ Bolt Optimization:
-// Custom string map optimized for zero-allocation lookup and fast search with O(log N) complexity.
-// Why it is faster in C++: `std::unordered_map<std::string, std::string>::find()` requires a
-// `std::string` argument in C++11/14, forcing an implicit heap allocation on every tensor query
-// inside the execution hot path (`ProcessRequests`). Since the number of inputs and outputs
-// per model is very small (typically <10), or even for hundreds (~800), maintaining a contiguous
-// sorted vector guarantees exceptional cache locality and entirely eliminates string allocations
-// when looking up elements using a `const char*` and `std::lower_bound`.
 struct IONameMap {
   using value_type = std::pair<std::string, std::string>;
   using container_type = std::vector<value_type>;

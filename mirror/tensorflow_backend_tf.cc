@@ -33,9 +33,13 @@
 #if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wignored-qualifiers"
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#pragma clang diagnostic ignored "-Wsign-compare"
 #elif defined(__GNUC__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wignored-qualifiers"
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#pragma GCC diagnostic ignored "-Wsign-compare"
 #endif
 
 #include "tensorflow/c/c_api.h"
@@ -50,12 +54,6 @@
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.pb.h"
 #include "tensorflow/core/framework/types.pb.h"
-
-#if defined(__clang__)
-#pragma clang diagnostic pop
-#elif defined(__GNUC__)
-#pragma GCC diagnostic pop
-#endif
 
 // TensorFlow 2.18 headers define logging/check macros in two places:
 // 1. tsl/platform/default/logging.h (pulled in by core framework headers)
@@ -126,21 +124,6 @@
 #ifdef DCHECK_GT
 #undef DCHECK_GT
 #endif
-#ifdef LOG
-#undef LOG
-#endif
-#ifdef LOG_EVERY_N
-#undef LOG_EVERY_N
-#endif
-#ifdef LOG_FIRST_N
-#undef LOG_FIRST_N
-#endif
-#ifdef LOG_EVERY_POW_2
-#undef LOG_EVERY_POW_2
-#endif
-#ifdef LOG_EVERY_N_SEC
-#undef LOG_EVERY_N_SEC
-#endif
 
 #include "tensorflow/core/graph/default_device.h"
 #include "tensorflow/core/grappler/utils.h"
@@ -154,6 +137,12 @@
 #ifdef TRITON_ENABLE_GPU
 #include "third_party/gpus/cuda/include/cuda_runtime_api.h"
 #endif  // TRITON_ENABLE_GPU
+
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#elif defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
 TRITONTF_Error* TRITONTF_ErrorNew(const std::string& str);
 TRITONTF_Shape* TRITONTF_ShapeNew(size_t rank, int64_t* dims);

@@ -53,24 +53,64 @@ namespace triton { namespace backend { namespace tensorflow {
 using cudaStream_t = void*;
 #endif  // !TRITON_ENABLE_GPU
 
-// Custom string map optimized for small number of elements and zero-allocation lookup
+// ⚡ Bolt Optimization:
+// Custom string map optimized for zero-allocation lookup and fast search with O(log N) complexity.
+// Why it is faster in C++: `std::unordered_map<std::string, std::string>::find()` requires a
+// `std::string` argument in C++11/14, forcing an implicit heap allocation on every tensor query
+// inside the execution hot path (`ProcessRequests`). Since the number of inputs and outputs
+// per model is very small (typically <10), or even for hundreds (~800), maintaining a contiguous
+// sorted vector guarantees exceptional cache locality and entirely eliminates string allocations
+// when looking up elements using a `const char*` and `std::lower_bound`.
 struct IONameMap {
-  std::vector<std::pair<std::string, std::string>> map_;
-  void insert(const std::pair<std::string, std::string>& p) {
-    map_.push_back(p);
-  }
-  const std::string* find(const char* name) const {
-    for (const auto& p : map_) {
-      if (p.first == name) {
-        return &p.second;
-      }
+  using value_type = std::pair<std::string, std::string>;
+  using container_type = std::vector<value_type>;
+  using iterator = container_type::iterator;
+  using const_iterator = container_type::const_iterator;
+
+  container_type map_;
+
+  std::pair<iterator, bool> insert(const value_type& p) {
+    auto it = std::lower_bound(
+        map_.begin(), map_.end(), p.first,
+        [](const value_type& a, const std::string& b) {
+          return a.first < b;
+        });
+    if (it != map_.end() && it->first == p.first) {
+      return {it, false};
+    } else {
+      auto new_it = map_.insert(it, p);
+      return {new_it, true};
     }
-    return nullptr;
   }
-  const std::string* find(const std::string& name) const {
+
+  const_iterator find(const char* name) const {
+    if (name == nullptr) return end();
+    auto it = std::lower_bound(
+        map_.begin(), map_.end(), name,
+        [](const value_type& a, const char* b) {
+          return std::strcmp(a.first.c_str(), b) < 0;
+        });
+    if (it != map_.end() && it->first == name) {
+      return it;
+    }
+    return end();
+  }
+
+  const_iterator find(const std::string& name) const {
     return find(name.c_str());
   }
-  auto end() const { return nullptr; }
+
+  iterator begin() { return map_.begin(); }
+  const_iterator begin() const { return map_.begin(); }
+  const_iterator cbegin() const { return map_.cbegin(); }
+
+  iterator end() { return map_.end(); }
+  const_iterator end() const { return map_.end(); }
+  const_iterator cend() const { return map_.cend(); }
+
+  size_t size() const { return map_.size(); }
+  bool empty() const { return map_.empty(); }
+  void clear() { map_.clear(); }
 };
 
 using TRITONTFModelHandle = std::shared_ptr<TRITONTF_Model>;
@@ -955,9 +995,10 @@ ModelState::CreateModel(
       std::string io_data_type;
       RETURN_IF_ERROR(io.MemberAsString("data_type", &io_data_type));
 
-      const auto itr = lmodel.input_name_map_.find(io_names.back());
+      const auto& itr = lmodel.input_name_map_.find(io_names.back());
       input_names.push_back(
-          itr != nullptr ? itr->c_str() : io_names.back().c_str());
+          itr != lmodel.input_name_map_.end() ? itr->second.c_str()
+                                              : io_names.back().c_str());
       input_types.push_back(ConvertDataType(io_data_type));
     }
     triton::common::TritonJson::Value config_outputs;
@@ -970,9 +1011,10 @@ ModelState::CreateModel(
       std::string io_data_type;
       RETURN_IF_ERROR(io.MemberAsString("data_type", &io_data_type));
 
-      const auto itr = lmodel.output_name_map_.find(io_names.back());
+      const auto& itr = lmodel.output_name_map_.find(io_names.back());
       output_names.push_back(
-          itr != nullptr ? itr->c_str() : io_names.back().c_str());
+          itr != lmodel.output_name_map_.end() ? itr->second.c_str()
+                                               : io_names.back().c_str());
       output_types.push_back(ConvertDataType(io_data_type));
     }
 
@@ -2110,9 +2152,9 @@ ModelInstanceState::ProcessRequests(
 
       // The name of the input in the model can be different...
       const char* input_tensor_name = name;
-      const auto tn_itr = model_.input_name_map_.find(input_tensor_name);
-      if (tn_itr != nullptr) {
-        input_tensor_name = tn_itr->c_str();
+      const auto& tn_itr = model_.input_name_map_.find(input_tensor_name);
+      if (tn_itr != model_.input_name_map_.end()) {
+        input_tensor_name = tn_itr->second.c_str();
       }
 
       // Create a TF tensor to hold the entire input batch. Only try
@@ -2207,9 +2249,9 @@ ModelInstanceState::ProcessRequests(
       for (const auto& input_name : batch_input.TargetNames()) {
         // The name of the input in the model can be different...
         const char* input_tensor_name = input_name.c_str();
-        const auto tn_itr = model_.input_name_map_.find(input_name);
-        if (tn_itr != nullptr) {
-          input_tensor_name = tn_itr->c_str();
+        const auto& tn_itr = model_.input_name_map_.find(input_name);
+        if (tn_itr != model_.input_name_map_.end()) {
+          input_tensor_name = tn_itr->second.c_str();
         }
 
         // Create a TF tensor to hold the entire input batch. Only try
@@ -2336,11 +2378,11 @@ ModelInstanceState::ProcessRequests(
   output_names_cstr.reserve(required_outputs.size());
   {
     for (const char* name : required_outputs) {
-      const auto tn_itr = model_.output_name_map_.find(name);
-      if (tn_itr == nullptr) {
+      const auto& tn_itr = model_.output_name_map_.find(name);
+      if (tn_itr == model_.output_name_map_.end()) {
         output_names_cstr.push_back(name);
       } else {
-        output_names_cstr.push_back(tn_itr->c_str());
+        output_names_cstr.push_back(tn_itr->second.c_str());
       }
     }
   }

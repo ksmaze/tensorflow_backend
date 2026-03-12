@@ -910,11 +910,14 @@ ModelState::CreateModel(
                   }
                 }
                 tftrt_config_ptr = &tftrt_config;
-                LOG_MESSAGE(
-                    TRITONSERVER_LOG_VERBOSE,
-                    (std::string("TensorRT Execution Accelerator is set for ") +
-                     Name())
-                        .c_str());
+                if (TRITONSERVER_LogIsEnabled(TRITONSERVER_LOG_VERBOSE)) {
+                  LOG_MESSAGE(
+                      TRITONSERVER_LOG_VERBOSE,
+                      (std::string(
+                           "TensorRT Execution Accelerator is set for ") +
+                       Name())
+                          .c_str());
+                }
               } else if (name == kGPUIOExecutionAccelerator) {
                 // GPU I/O can be set, set hint
                 if ((device_id != ModelState::NO_GPU_DEVICE) &&
@@ -1833,9 +1836,11 @@ ModelState::ValidateModelConfig()
   // We have the json DOM for the model configuration...
   triton::common::TritonJson::WriteBuffer buffer;
   RETURN_IF_ERROR(ModelConfig().PrettyWrite(&buffer));
-  LOG_MESSAGE(
-      TRITONSERVER_LOG_VERBOSE,
-      (std::string("model configuration:\n") + buffer.Contents()).c_str());
+  if (TRITONSERVER_LogIsEnabled(TRITONSERVER_LOG_VERBOSE)) {
+    LOG_MESSAGE(
+        TRITONSERVER_LOG_VERBOSE,
+        (std::string("model configuration:\n") + buffer.Contents()).c_str());
+  }
 
   triton::common::TritonJson::Value ios;
   RETURN_IF_ERROR(ModelConfig().MemberAsArray("input", &ios));
@@ -1971,11 +1976,13 @@ void
 ModelInstanceState::ProcessRequests(
     TRITONBACKEND_Request** requests, const uint32_t request_count)
 {
-  LOG_MESSAGE(
-      TRITONSERVER_LOG_VERBOSE,
-      (std::string("TRITONBACKEND_ModelExecute: Running ") + Name() + " with " +
-       std::to_string(request_count) + " requests")
-          .c_str());
+  if (TRITONSERVER_LogIsEnabled(TRITONSERVER_LOG_VERBOSE)) {
+    LOG_MESSAGE(
+        TRITONSERVER_LOG_VERBOSE,
+        (std::string("TRITONBACKEND_ModelExecute: Running ") + Name() +
+         " with " + std::to_string(request_count) + " requests")
+            .c_str());
+  }
 
   uint64_t exec_start_ns = 0;
   SET_TIMESTAMP(exec_start_ns);
@@ -2227,12 +2234,14 @@ ModelInstanceState::ProcessRequests(
             (TRITONTF_TensorIsGPUTensor(tensor)) ? DeviceId() : 0);
       }
 
-      LOG_MESSAGE(
-          TRITONSERVER_LOG_VERBOSE,
-          (std::string("TRITONBACKEND_ModelExecute: input '") + name +
-           "' is GPU tensor: " +
-           ((TRITONTF_TensorIsGPUTensor(tensor)) ? "true" : "false"))
-              .c_str());
+      if (TRITONSERVER_LogIsEnabled(TRITONSERVER_LOG_VERBOSE)) {
+        LOG_MESSAGE(
+            TRITONSERVER_LOG_VERBOSE,
+            (std::string("TRITONBACKEND_ModelExecute: input '") + name +
+             "' is GPU tensor: " +
+             ((TRITONTF_TensorIsGPUTensor(tensor)) ? "true" : "false"))
+                .c_str());
+      }
     }
 
     // Process batch input if any
@@ -2307,12 +2316,14 @@ ModelInstanceState::ProcessRequests(
                 &dst_buffer, &dst_buffer_byte_size, &dst_memory_type,
                 &dst_memory_type_id));
 
-        LOG_MESSAGE(
-            TRITONSERVER_LOG_VERBOSE,
-            (std::string("TRITONBACKEND_ModelExecute: input '") + input_name +
-             "' is GPU tensor: " +
-             ((TRITONTF_TensorIsGPUTensor(tensor)) ? "true" : "false"))
-                .c_str());
+        if (TRITONSERVER_LogIsEnabled(TRITONSERVER_LOG_VERBOSE)) {
+          LOG_MESSAGE(
+              TRITONSERVER_LOG_VERBOSE,
+              (std::string("TRITONBACKEND_ModelExecute: input '") + input_name +
+               "' is GPU tensor: " +
+               ((TRITONTF_TensorIsGPUTensor(tensor)) ? "true" : "false"))
+                  .c_str());
+        }
       }
     }
 
@@ -2521,12 +2532,14 @@ ModelInstanceState::ProcessRequests(
             (TRITONTF_TensorIsGPUTensor(output_tensor)) ? DeviceId() : 0);
       }
 
-      LOG_MESSAGE(
-          TRITONSERVER_LOG_VERBOSE,
-          (std::string("TRITONBACKEND_ModelExecute: output '") + name +
-           "' is GPU tensor: " +
-           ((TRITONTF_TensorIsGPUTensor(output_tensor)) ? "true" : "false"))
-              .c_str());
+      if (TRITONSERVER_LogIsEnabled(TRITONSERVER_LOG_VERBOSE)) {
+        LOG_MESSAGE(
+            TRITONSERVER_LOG_VERBOSE,
+            (std::string("TRITONBACKEND_ModelExecute: output '") + name +
+             "' is GPU tensor: " +
+             ((TRITONTF_TensorIsGPUTensor(output_tensor)) ? "true" : "false"))
+                .c_str());
+      }
 
       output_tensor_itr = output_tensor_itr->next_;
       out_idx++;
@@ -2580,11 +2593,13 @@ ModelInstanceState::ProcessRequests(
           compute_start_ns, compute_end_ns, exec_end_ns),
       "failed reporting batch request statistics");
 
-  LOG_MESSAGE(
-      TRITONSERVER_LOG_VERBOSE,
-      (std::string("TRITONBACKEND_ModelExecute: model ") + Name() +
-       " released " + std::to_string(request_count) + " requests")
-          .c_str());
+  if (TRITONSERVER_LogIsEnabled(TRITONSERVER_LOG_VERBOSE)) {
+    LOG_MESSAGE(
+        TRITONSERVER_LOG_VERBOSE,
+        (std::string("TRITONBACKEND_ModelExecute: model ") + Name() +
+         " released " + std::to_string(request_count) + " requests")
+            .c_str());
+  }
 }
 
 /////////////
@@ -2828,12 +2843,14 @@ TRITONBACKEND_ModelInstanceExecute(
   // from this function so that it is again available to be used for
   // another call to TRITONBACKEND_ModelInstanceExecute.
 
-  LOG_MESSAGE(
-      TRITONSERVER_LOG_VERBOSE,
-      (std::string("model ") + model_state->Name() + ", instance " +
-       instance_state->Name() + ", executing " + std::to_string(request_count) +
-       " requests")
-          .c_str());
+  if (TRITONSERVER_LogIsEnabled(TRITONSERVER_LOG_VERBOSE)) {
+    LOG_MESSAGE(
+        TRITONSERVER_LOG_VERBOSE,
+        (std::string("model ") + model_state->Name() + ", instance " +
+         instance_state->Name() + ", executing " +
+         std::to_string(request_count) + " requests")
+            .c_str());
+  }
 
   // At this point we accept ownership of 'requests', which means that
   // even if something goes wrong we must still return success from

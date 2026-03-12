@@ -611,70 +611,12 @@ FillStringTensor(TRITONTF_Tensor* tensor, const size_t idx, const size_t cnt)
   }
 }
 
-TRITONSERVER_Error*
-ParseAndSetStringInputTensor(
-    TRITONTF_Tensor* tensor, const char* content,
-    const size_t content_byte_size, const size_t request_element_cnt,
-    const size_t tensor_offset, const char* input_name,
-    const char* model_name, size_t* element_cnt)
-{
-  *element_cnt = 0;
-
-  const char* current = content;
-  size_t remaining_byte_size = content_byte_size;
-
-  while (*element_cnt < request_element_cnt) {
-    if (remaining_byte_size < sizeof(uint32_t)) {
-      return TRITONSERVER_ErrorNew(
-          TRITONSERVER_ERROR_INVALID_ARG,
-          (std::string("expected ") + std::to_string(request_element_cnt) +
-           " string elements for inference input '" + input_name +
-           "' for model '" + model_name + "', got " +
-           std::to_string(*element_cnt))
-              .c_str());
-    }
-
-    uint32_t element_size = 0;
-    std::memcpy(&element_size, current, sizeof(element_size));
-    current += sizeof(element_size);
-    remaining_byte_size -= sizeof(element_size);
-
-    if (remaining_byte_size < element_size) {
-      return TRITONSERVER_ErrorNew(
-          TRITONSERVER_ERROR_INVALID_ARG,
-          (std::string("expected ") + std::to_string(request_element_cnt) +
-           " string elements for inference input '" + input_name +
-           "' for model '" + model_name + "', got " +
-           std::to_string(*element_cnt))
-              .c_str());
-    }
-
-    TRITONTF_TensorSetString(
-        tensor, tensor_offset + *element_cnt, current, element_size);
-    current += element_size;
-    remaining_byte_size -= element_size;
-    ++(*element_cnt);
-  }
-
-  if (remaining_byte_size != 0) {
-    return TRITONSERVER_ErrorNew(
-        TRITONSERVER_ERROR_INVALID_ARG,
-        (std::string("unexpected number of string elements ") +
-         std::to_string(request_element_cnt + 1) +
-         " for inference input '" + input_name + "' for model '" +
-         model_name + "', expecting " + std::to_string(request_element_cnt))
-            .c_str());
-  }
-
-  return nullptr;
-}
-
 bool
 SetStringInputTensor(
     TRITONTF_Tensor* tensor, TRITONBACKEND_Input* input, const char* name,
     const uint32_t buffer_count, const size_t request_element_cnt,
     const size_t tensor_offset, TRITONBACKEND_Response** response,
-    cudaStream_t stream, const char* model_name, const char* host_policy_name)
+    cudaStream_t stream, const char* host_policy_name)
 {
   bool cuda_copy = false;
 
@@ -703,10 +645,16 @@ SetStringInputTensor(
   }
 #endif  // TRITON_ENABLE_GPU
 
-  size_t element_cnt = 0;
-  err = ParseAndSetStringInputTensor(
-      tensor, content, content_byte_size, request_element_cnt, tensor_offset,
-      name, model_name, &element_cnt);
+  std::vector<std::pair<const char*, const uint32_t>> str_list;
+  err = ValidateStringBuffer(
+      content, content_byte_size, request_element_cnt, name, &str_list);
+  // Set string values.
+  for (size_t element_idx = 0; element_idx < str_list.size(); ++element_idx) {
+    const auto& [addr, len] = str_list[element_idx];
+    TRITONTF_TensorSetString(tensor, tensor_offset + element_idx, addr, len);
+  }
+
+  size_t element_cnt = str_list.size();
   if (err != nullptr) {
     RESPOND_AND_SET_NULL_IF_ERROR(response, err);
     FillStringTensor(
@@ -2244,6 +2192,7 @@ ModelInstanceState::ProcessRequests(
       // Custom handling for string/bytes tensor...
       if (datatype == TRITONSERVER_TYPE_BYTES) {
         size_t tensor_offset = 0;
+        const char* host_policy_cstr = HostPolicyName().c_str();
 
         for (size_t idx = 0; idx < request_count; idx++) {
           TRITONBACKEND_Input* input;
@@ -2256,15 +2205,15 @@ ModelInstanceState::ProcessRequests(
           RESPOND_AND_SET_NULL_IF_ERROR(
               &responses[idx],
               TRITONBACKEND_InputPropertiesForHostPolicy(
-                  input, HostPolicyName().c_str(), nullptr, nullptr, &shape,
+                  input, host_policy_cstr, nullptr, nullptr, &shape,
                   &dims_count, nullptr, &buffer_count));
 
           const int64_t batch_element_cnt = GetElementCount(shape, dims_count);
 
           cuda_copy |= SetStringInputTensor(
               tensor, input, name, buffer_count, batch_element_cnt,
-              tensor_offset, &responses[idx], CudaStream(), Name().c_str(),
-              HostPolicyName().c_str());
+              tensor_offset, &responses[idx], CudaStream(),
+              host_policy_cstr);
           tensor_offset += batch_element_cnt;
         }
       }

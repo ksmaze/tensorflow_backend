@@ -256,17 +256,15 @@ ConvertShape(TRITONTF_Shape* shape, tensorflow::TensorShape* tfshape)
 TRITONTF_Shape*
 ConvertShape(const tensorflow::TensorShape& tfshape)
 {
-  TRITONTF_Shape* shape = new TRITONTF_Shape;
-  shape->rank_ = tfshape.dims();
-  shape->dims_ = nullptr;
-
-  if (shape->rank_ > 0) {
-    shape->dims_ = new int64_t[shape->rank_];
-    for (int i = 0; i < tfshape.dims(); ++i) {
-      shape->dims_[i] = tfshape.dim_size(i);
-    }
+  const size_t rank = tfshape.dims();
+  if (rank == 0) {
+    return TRITONTF_ShapeNew(0, nullptr);
   }
-  return shape;
+  std::vector<int64_t> dims(rank);
+  for (size_t i = 0; i < rank; ++i) {
+    dims[i] = tfshape.dim_size(i);
+  }
+  return TRITONTF_ShapeNew(rank, dims.data());
 }
 
 std::string
@@ -456,6 +454,9 @@ class TensorImpl {
   // tensorflow::DataTypeToEnum<std::string>.
   const tensorflow::tstring& String(size_t idx) const;
   void SetString(size_t idx, const char* cstr, size_t length);
+  void SetStrings(
+      size_t start_idx, size_t count, const char* const* strs,
+      const size_t* lengths);
 
  private:
   void Init();
@@ -473,7 +474,7 @@ class TensorImpl {
 TensorImpl::TensorImpl(
     const char* name, TRITONTF_DataType dtype, TRITONTF_Shape* shape,
     const tensorflow::TensorShape& tfshape, const int tf_gpu_id)
-    : name_(name), dtype_(dtype), shape_(shape)
+    : name_((name != nullptr) ? name : ""), dtype_(dtype), shape_(shape)
 {
 #ifdef TRITON_ENABLE_GPU
   // Only request for GPU allocator for supported data type
@@ -547,6 +548,22 @@ TensorImpl::SetString(size_t idx, const char* cstr, size_t length)
   }
 }
 
+void
+TensorImpl::SetStrings(
+    size_t start_idx, size_t count, const char* const* strs,
+    const size_t* lengths)
+{
+  auto flat = tftensor_.flat<tensorflow::tstring>();
+  for (size_t i = 0; i < count; ++i) {
+    const size_t idx = start_idx + i;
+    if ((strs[i] == nullptr) || (lengths[i] == 0)) {
+      flat(idx).clear();
+    } else {
+      flat(idx).assign(strs[i], lengths[i]);
+    }
+  }
+}
+
 //
 // ModelImpl
 //
@@ -570,8 +587,8 @@ class ModelImpl {
   TRITONTF_Error* MakeCallable(const tensorflow::CallableOptions& opts);
 
   TRITONTF_Error* Run(
-      TRITONTF_TensorList* input_tensors,
-      const std::vector<std::string>& output_names,
+      TRITONTF_TensorList* input_tensors, size_t input_count,
+      const char** output_names, size_t num_outputs,
       TRITONTF_TensorList** output_tensors);
 
   // Run a single operation.
@@ -646,18 +663,10 @@ ModelImpl::MakeCallable(const tensorflow::CallableOptions& opts)
 
 TRITONTF_Error*
 ModelImpl::Run(
-    TRITONTF_TensorList* input_tensors,
-    const std::vector<std::string>& output_names,
+    TRITONTF_TensorList* input_tensors, size_t input_count,
+    const char** output_names, size_t num_outputs,
     TRITONTF_TensorList** output_tensors)
 {
-  size_t input_count = 0;
-  for (TRITONTF_TensorList* itr = input_tensors; itr != nullptr;
-       itr = itr->next_) {
-    if (itr->tensor_ != nullptr) {
-      ++input_count;
-    }
-  }
-
   // I/O needs to be prepared differently for callable
   if (has_callable_) {
     std::vector<tensorflow::Tensor> tfinputs;
@@ -678,8 +687,9 @@ ModelImpl::Run(
         session_->RunCallable(callable_, tfinputs, &tfoutputs, &meta_data));
 
     *output_tensors = nullptr;
-    for (auto ri = output_names.rbegin(); ri != output_names.rend(); ++ri) {
-      const auto oidx = output_index_map_[*ri];
+    for (size_t ri = num_outputs; ri > 0; --ri) {
+      const std::string oname(output_names[ri - 1]);
+      const auto oidx = output_index_map_[oname];
       TRITONTF_Tensor* tensor = reinterpret_cast<TRITONTF_Tensor*>(
           new TensorImpl(std::move(tfoutputs[oidx])));
       *output_tensors = TRITONTF_TensorListNew(tensor, *output_tensors);
@@ -703,8 +713,16 @@ ModelImpl::Run(
     }
     TRITONTF_TensorListDelete(input_tensors);
 
+    // Build vector<string> only for the non-callable path which needs it
+    std::vector<std::string> output_names_vec;
+    output_names_vec.reserve(num_outputs);
+    for (size_t i = 0; i < num_outputs; ++i) {
+      output_names_vec.emplace_back(output_names[i]);
+    }
+
     std::vector<tensorflow::Tensor> tfoutputs;
-    RETURN_IF_TF_ERROR(session_->Run(tfinputs, output_names, {}, &tfoutputs));
+    RETURN_IF_TF_ERROR(
+        session_->Run(tfinputs, output_names_vec, {}, &tfoutputs));
 
     *output_tensors = nullptr;
     for (std::vector<tensorflow::Tensor>::reverse_iterator ri =
@@ -758,12 +776,18 @@ TRITONTF_ErrorDelete(TRITONTF_Error* error)
 TRITONTF_Shape*
 TRITONTF_ShapeNew(size_t rank, int64_t* dims)
 {
-  TRITONTF_Shape* shape = new TRITONTF_Shape;
+  // Single allocation for both the shape struct and dims array to halve
+  // heap pressure .
+  const size_t dims_bytes = rank * sizeof(int64_t);
+  char* buf =
+      static_cast<char*>(::operator new(sizeof(TRITONTF_Shape) + dims_bytes));
+  TRITONTF_Shape* shape = reinterpret_cast<TRITONTF_Shape*>(buf);
   shape->rank_ = rank;
-  shape->dims_ = nullptr;
   if (rank > 0) {
-    shape->dims_ = new int64_t[rank];
-    memcpy(shape->dims_, dims, rank * sizeof(int64_t));
+    shape->dims_ = reinterpret_cast<int64_t*>(buf + sizeof(TRITONTF_Shape));
+    memcpy(shape->dims_, dims, dims_bytes);
+  } else {
+    shape->dims_ = nullptr;
   }
 
   return shape;
@@ -773,8 +797,8 @@ void
 TRITONTF_ShapeDelete(TRITONTF_Shape* shape)
 {
   if (shape != nullptr) {
-    delete[] shape->dims_;
-    delete shape;
+    // dims_ is part of the same allocation, no separate free needed.
+    ::operator delete(shape);
   }
 }
 
@@ -829,10 +853,34 @@ TRITONTF_IOListDelete(TRITONTF_IOList* list)
 //
 // TRITONTF_TensorList
 //
+// Thread-local free list for TensorList nodes.
+namespace {
+thread_local TRITONTF_TensorList* tl_free_list_ = nullptr;
+
+inline TRITONTF_TensorList*
+TensorListAlloc()
+{
+  if (tl_free_list_ != nullptr) {
+    TRITONTF_TensorList* node = tl_free_list_;
+    tl_free_list_ = node->next_;
+    return node;
+  }
+  return new TRITONTF_TensorList;
+}
+
+inline void
+TensorListFree(TRITONTF_TensorList* node)
+{
+  node->tensor_ = nullptr;
+  node->next_ = tl_free_list_;
+  tl_free_list_ = node;
+}
+}  // namespace
+
 TRITONTF_TensorList*
 TRITONTF_TensorListNew(TRITONTF_Tensor* tensor, TRITONTF_TensorList* next)
 {
-  TRITONTF_TensorList* tl = new TRITONTF_TensorList;
+  TRITONTF_TensorList* tl = TensorListAlloc();
   tl->tensor_ = tensor;
   tl->next_ = next;
   return tl;
@@ -845,12 +893,10 @@ TRITONTF_TensorListDelete(TRITONTF_TensorList* list)
     if (list->tensor_ != nullptr) {
       TensorImpl* tensor = reinterpret_cast<TensorImpl*>(list->tensor_);
       delete tensor;
-      list->tensor_ = nullptr;
     }
 
     TRITONTF_TensorList* next = list->next_;
-    list->next_ = nullptr;
-    delete list;
+    TensorListFree(list);
     list = next;
   }
 }
@@ -937,6 +983,15 @@ TRITONTF_TensorSetString(
 {
   TensorImpl* t = reinterpret_cast<TensorImpl*>(tensor);
   t->SetString(idx, cstr, length);
+}
+
+void
+TRITONTF_TensorSetStrings(
+    TRITONTF_Tensor* tensor, size_t start_idx, size_t count,
+    const char* const* strs, const size_t* lengths)
+{
+  TensorImpl* t = reinterpret_cast<TensorImpl*>(tensor);
+  t->SetStrings(start_idx, count, strs, lengths);
 }
 
 //
@@ -1273,13 +1328,18 @@ TRITONTF_ModelRun(
 {
   ModelImpl* m = reinterpret_cast<ModelImpl*>(model);
 
-  std::vector<std::string> output_tensor_names;
-  output_tensor_names.reserve(num_outputs);
-  for (size_t i = 0; i < num_outputs; ++i) {
-    output_tensor_names.emplace_back(output_names[i]);
+  // Count inputs once here so Run() can reserve without re-traversing
+  // the all node linked list.
+  size_t input_count = 0;
+  for (TRITONTF_TensorList* itr = input_tensors; itr != nullptr;
+       itr = itr->next_) {
+    if (itr->tensor_ != nullptr) {
+      ++input_count;
+    }
   }
 
-  return m->Run(input_tensors, output_tensor_names, output_tensors);
+  return m->Run(
+      input_tensors, input_count, output_names, num_outputs, output_tensors);
 }
 
 TRITONTF_Error*

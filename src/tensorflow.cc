@@ -648,10 +648,30 @@ SetStringInputTensor(
   std::vector<std::pair<const char*, const uint32_t>> str_list;
   err = ValidateStringBuffer(
       content, content_byte_size, request_element_cnt, name, &str_list);
-  // Set string values.
-  for (size_t element_idx = 0; element_idx < str_list.size(); ++element_idx) {
-    const auto& [addr, len] = str_list[element_idx];
-    TRITONTF_TensorSetString(tensor, tensor_offset + element_idx, addr, len);
+  // Set string values using batch API to compute flat<tstring>() once.
+  // Use stack arrays for small counts (typical for scalar string inputs)
+  // to avoid heap allocations that would negate the benefit.
+  if (!str_list.empty()) {
+    const size_t n = str_list.size();
+    constexpr size_t kStackThreshold = 32;
+    if (n <= kStackThreshold) {
+      const char* ptrs[kStackThreshold];
+      size_t lens[kStackThreshold];
+      for (size_t i = 0; i < n; ++i) {
+        ptrs[i] = str_list[i].first;
+        lens[i] = str_list[i].second;
+      }
+      TRITONTF_TensorSetStrings(tensor, tensor_offset, n, ptrs, lens);
+    } else {
+      std::vector<const char*> str_ptrs(n);
+      std::vector<size_t> str_lens(n);
+      for (size_t i = 0; i < n; ++i) {
+        str_ptrs[i] = str_list[i].first;
+        str_lens[i] = str_list[i].second;
+      }
+      TRITONTF_TensorSetStrings(
+          tensor, tensor_offset, n, str_ptrs.data(), str_lens.data());
+    }
   }
 
   size_t element_cnt = str_list.size();
@@ -2151,10 +2171,18 @@ ModelInstanceState::ProcessRequests(
       }
 
       // The name of the input in the model can be different...
-      const char* input_tensor_name = name;
-      const auto& tn_itr = model_.input_name_map_.find(input_tensor_name);
-      if (tn_itr != model_.input_name_map_.end()) {
-        input_tensor_name = tn_itr->second.c_str();
+      // In the callable path (input_device_id_ != MODEL_DEVICE),
+      // RunCallable uses positional inputs so the tensor name is unused.
+      // Pass nullptr to avoid string heap allocations per execute.
+      const bool use_callable =
+          (model_.input_device_id_ != ModelState::MODEL_DEVICE);
+      const char* input_tensor_name = nullptr;
+      if (!use_callable) {
+        input_tensor_name = name;
+        const auto& tn_itr = model_.input_name_map_.find(name);
+        if (tn_itr != model_.input_name_map_.end()) {
+          input_tensor_name = tn_itr->second.c_str();
+        }
       }
 
       // Create a TF tensor to hold the entire input batch. Only try
@@ -2251,10 +2279,16 @@ ModelInstanceState::ProcessRequests(
 
       for (const auto& input_name : batch_input.TargetNames()) {
         // The name of the input in the model can be different...
-        const char* input_tensor_name = input_name.c_str();
-        const auto& tn_itr = model_.input_name_map_.find(input_name);
-        if (tn_itr != model_.input_name_map_.end()) {
-          input_tensor_name = tn_itr->second.c_str();
+        // Skip name resolution in callable path (positional inputs).
+        const bool use_callable =
+            (model_.input_device_id_ != ModelState::MODEL_DEVICE);
+        const char* input_tensor_name = nullptr;
+        if (!use_callable) {
+          input_tensor_name = input_name.c_str();
+          const auto& tn_itr = model_.input_name_map_.find(input_name);
+          if (tn_itr != model_.input_name_map_.end()) {
+            input_tensor_name = tn_itr->second.c_str();
+          }
         }
 
         // Create a TF tensor to hold the entire input batch. Only try

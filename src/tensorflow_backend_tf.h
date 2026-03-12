@@ -211,6 +211,13 @@ TRITONTF_EXPORT const char* TRITONTF_TensorString(
 TRITONTF_EXPORT void TRITONTF_TensorSetString(
     TRITONTF_Tensor* tensor, size_t idx, const char* str, size_t length);
 
+// Batch-set multiple strings starting at 'start_idx'. Each entry in
+// 'strs' is a (pointer, length) pair. This avoids the overhead of
+// re-computing flat<tstring>() on every individual SetString call.
+TRITONTF_EXPORT void TRITONTF_TensorSetStrings(
+    TRITONTF_Tensor* tensor, size_t start_idx, size_t count,
+    const char* const* strs, const size_t* lengths);
+
 //
 // Model
 //

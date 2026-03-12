@@ -681,6 +681,15 @@ ModelImpl::Run(
     }
     TRITONTF_TensorListDelete(input_tensors);
 
+    // The input linked list is built by prepending in ProcessRequests,
+    // so it arrives in reverse order. Reverse to match the positional
+    // feed order registered during MakeCallable.
+    if (tfinputs.size() > 1) {
+      for (size_t i = 0, j = tfinputs.size() - 1; i < j; ++i, --j) {
+        std::swap(tfinputs[i], tfinputs[j]);
+      }
+    }
+
     tensorflow::RunMetadata meta_data;
     std::vector<tensorflow::Tensor> tfoutputs;
     RETURN_IF_TF_ERROR(

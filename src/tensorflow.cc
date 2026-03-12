@@ -752,7 +752,11 @@ class ModelState : public BackendModel {
   static constexpr int MODEL_DEVICE = -2;
 
   struct Model {
-    Model() : tritontf_model_(nullptr), input_device_id_(MODEL_DEVICE) {}
+    Model()
+        : tritontf_model_(nullptr), input_device_id_(MODEL_DEVICE),
+          has_callable_(false)
+    {
+    }
     // Map from configuration name for an input to tensor name for
     // that input in the model.
     IONameMap input_name_map_;
@@ -766,6 +770,11 @@ class ModelState : public BackendModel {
 
     // use for GPU allocator
     int input_device_id_;
+
+    // Whether a TF Callable was successfully created for this model.
+    // Callable uses positional I/O and pre-compiled execution plan,
+    // avoiding per-call name resolution overhead.
+    bool has_callable_;
   };
   static TRITONSERVER_Error* Create(
       TRITONBACKEND_Model* triton_model, ModelState** state);
@@ -996,7 +1005,12 @@ ModelState::CreateModel(
         this, model, &(lmodel.input_name_map_), &(lmodel.output_name_map_)));
   }
 
-  if (lmodel.input_device_id_ != ModelState::MODEL_DEVICE) {
+  // Always create a TF Callable for pre-compiled positional I/O.
+  // This avoids per-call name resolution for many inputs and
+  // eliminates string copies in the session_->Run feed dict path.
+  // On GPU, device mappings are set for supported types.
+  // On CPU, callable works without device mappings (uses default CPU).
+  {
     std::vector<const char*> input_names, output_names;
     std::vector<TRITONTF_DataType> input_types, output_types;
     std::deque<std::string> io_names;
@@ -1038,6 +1052,7 @@ ModelState::CreateModel(
         lmodel.tritontf_model_.get(), input_names.data(), input_types.data(),
         config_inputs.ArraySize(), output_names.data(), output_types.data(),
         config_outputs.ArraySize()));
+    lmodel.has_callable_ = true;
   }
 
   if (!init_ops_file_.empty()) {
@@ -2171,11 +2186,9 @@ ModelInstanceState::ProcessRequests(
       }
 
       // The name of the input in the model can be different...
-      // In the callable path (input_device_id_ != MODEL_DEVICE),
-      // RunCallable uses positional inputs so the tensor name is unused.
-      // Pass nullptr to avoid string heap allocations per execute.
-      const bool use_callable =
-          (model_.input_device_id_ != ModelState::MODEL_DEVICE);
+      // In the callable path, RunCallable uses positional inputs so
+      // the tensor name is unused. Pass nullptr to skip name alloc.
+      const bool use_callable = model_.has_callable_;
       const char* input_tensor_name = nullptr;
       if (!use_callable) {
         input_tensor_name = name;
@@ -2280,8 +2293,7 @@ ModelInstanceState::ProcessRequests(
       for (const auto& input_name : batch_input.TargetNames()) {
         // The name of the input in the model can be different...
         // Skip name resolution in callable path (positional inputs).
-        const bool use_callable =
-            (model_.input_device_id_ != ModelState::MODEL_DEVICE);
+        const bool use_callable = model_.has_callable_;
         const char* input_tensor_name = nullptr;
         if (!use_callable) {
           input_tensor_name = input_name.c_str();

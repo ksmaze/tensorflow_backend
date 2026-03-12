@@ -1291,16 +1291,14 @@ TRITONTF_ModelMakeCallable(
   ModelImpl* m = reinterpret_cast<ModelImpl*>(model);
 
   const auto& device_name = m->DeviceName();
-  if (device_name.empty()) {
-    return TRITONTF_ErrorNew(
-        "model session does not have an assigned GPU device");
-  }
 
   tensorflow::CallableOptions opts;
   for (size_t i = 0; i < num_inputs; ++i) {
     const std::string input_name = input_names[i];
     opts.add_feed(input_name);
-    if (IsGPUFeedAndFetchSupported(input_types[i])) {
+    // Only set device mapping when a GPU device is available.
+    // On CPU, callable still works — it just uses default CPU device.
+    if (!device_name.empty() && IsGPUFeedAndFetchSupported(input_types[i])) {
       opts.mutable_feed_devices()->insert({input_name, device_name});
     }
   }
@@ -1308,7 +1306,7 @@ TRITONTF_ModelMakeCallable(
   for (size_t i = 0; i < num_outputs; ++i) {
     const std::string output_name = output_names[i];
     opts.add_fetch(output_name);
-    if (IsGPUFeedAndFetchSupported(output_types[i])) {
+    if (!device_name.empty() && IsGPUFeedAndFetchSupported(output_types[i])) {
       opts.mutable_fetch_devices()->insert({output_name, device_name});
     }
   }

@@ -15,5 +15,5 @@
 **Action:** Replaced `std::unordered_map` with a custom `std::vector<std::pair<std::string, std::string>>` and linear search on `const char*` directly. Since the number of inputs/outputs per model is extremely small (<10), linear search is significantly more cache friendly and removes heap allocations entirely.
 
 ## 2024-05-19 - Fast Lookups for Large Tensor Counts without Allocation
-**Learning:** Some models can have up to ~800 inputs/outputs. A linear search on `std::vector` isn't scalable enough, but using `std::unordered_map` with `std::string` allocates heap memory when queried with `const char*` due to lack of transparent comparators.
+**Learning:** Some models can have up to ~800 inputs, but overall small 1-2 outputs. A linear search on `std::vector` isn't scalable enough, but using `std::unordered_map` with `std::string` allocates heap memory when queried with `const char*` due to lack of transparent comparators.
 **Action:** By maintaining a sorted `std::vector` and using `std::lower_bound` combined with a custom lambda comparing `a.first.c_str()` to the searched `const char*` using `std::strcmp(..., ...) < 0`, we achieve both `O(log N)` lookup times and zero `std::string` allocations!

@@ -696,6 +696,17 @@ SetStringOutputBuffer(
   // a 4-byte length followed by the string itself with no
   // null-terminator.
   serialized->clear();
+
+  // Pre-calculate the total length of the serialized string to avoid
+  // multiple dynamic heap re-allocations during the append operations.
+  size_t total_length = 0;
+  for (size_t e = 0; e < tensor_element_count; ++e) {
+    size_t len;
+    TRITONTF_TensorString(tensor, tensor_offset + e, &len);
+    total_length += sizeof(uint32_t) + len;
+  }
+  serialized->reserve(total_length);
+
   for (size_t e = 0; e < tensor_element_count; ++e) {
     size_t len;
     const char* cstr = TRITONTF_TensorString(tensor, tensor_offset + e, &len);
@@ -1940,17 +1951,6 @@ class ModelInstanceState : public BackendModelInstance {
   ModelState* model_state_;
   // Model for this context.
   ModelState::Model model_;
-
-  // Pre-allocated vectors for request execution to avoid heap allocations
-  std::vector<int64_t> request_batch_sizes_;
-  std::vector<TRITONBACKEND_Response*> responses_;
-  std::vector<const char*> required_outputs_;
-  std::vector<uint32_t> request_required_outputs_;
-  std::vector<uint32_t> request_outputs_start_;
-  std::vector<uint32_t> request_outputs_count_;
-  std::vector<const char*> output_names_cstr_;
-  std::vector<std::string> string_buffer_;
-  std::vector<int64_t> batchn_shape_;
 };
 
 TRITONSERVER_Error*
@@ -2039,7 +2039,7 @@ ModelInstanceState::ProcessRequests(
   // execution. The batch-size, number of inputs, and size of each
   // input has already been checked so don't need to do that here.
   size_t total_batch_size = 0;
-  request_batch_sizes_.assign(request_count, 1);
+  std::vector<int64_t> request_batch_sizes(request_count, 1);
   for (size_t i = 0; i < request_count; i++) {
     // If we get a nullptr request then something is badly wrong. Fail
     // and release all requests.
@@ -2066,7 +2066,7 @@ ModelInstanceState::ProcessRequests(
         err = TRITONBACKEND_InputProperties(
             input, nullptr, nullptr, &shape, nullptr, nullptr, nullptr);
         total_batch_size += shape[0];
-        request_batch_sizes_[i] = shape[0];
+        request_batch_sizes[i] = shape[0];
       }
       if (err != nullptr) {
         RequestsRespondWithError(requests, request_count, err);
@@ -2112,16 +2112,16 @@ ModelInstanceState::ProcessRequests(
   // need the outputs for a request that has an error, we do need to
   // know the size of those outputs associated with the request so we
   // can skip them in the output tensors).
-  responses_.clear();
-  responses_.reserve(request_count);
+  std::vector<TRITONBACKEND_Response*> responses;
+  responses.reserve(request_count);
 
   for (size_t i = 0; i < request_count; i++) {
     TRITONBACKEND_Response* response;
     auto err = TRITONBACKEND_ResponseNew(&response, requests[i]);
     if (err == nullptr) {
-      responses_.emplace_back(response);
+      responses.emplace_back(response);
     } else {
-      responses_.emplace_back(nullptr);
+      responses.emplace_back(nullptr);
       LOG_MESSAGE(TRITONSERVER_LOG_ERROR, "Fail to create response");
       TRITONSERVER_ErrorDelete(err);
     }
@@ -2148,7 +2148,7 @@ ModelInstanceState::ProcessRequests(
   bool cuda_copy = false;
 
   BackendInputCollector collector(
-      requests, request_count, &responses_,
+      requests, request_count, &responses,
       StateForModel()->TritonMemoryManager(),
       StateForModel()->EnablePinnedInput(), CudaStream(), nullptr, nullptr, 0,
       HostPolicyName().c_str());
@@ -2157,7 +2157,7 @@ ModelInstanceState::ProcessRequests(
     // request as the representative for the input tensors.
     uint32_t input_count;
     TRITONBACKEND_RequestInputCount(requests[0], &input_count);
-    batchn_shape_.clear();
+    std::vector<int64_t> batchn_shape;
     for (uint32_t input_idx = 0; input_idx < input_count; input_idx++) {
       TRITONBACKEND_Input* input;
       TRITONBACKEND_RequestInputByIndex(requests[0], input_idx, &input);
@@ -2168,31 +2168,31 @@ ModelInstanceState::ProcessRequests(
       TRITONBACKEND_InputProperties(
           input, &name, &datatype, &shape, &dims_count, nullptr, nullptr);
 
-      batchn_shape_.clear();
+      batchn_shape.clear();
       // For a ragged input tensor, the tensor shape should be
       // the flatten shape of the whole batch
       if (StateForModel()->IsInputRagged(name)) {
-        batchn_shape_.push_back(0);
+        batchn_shape.push_back(0);
         for (size_t idx = 0; idx < request_count; idx++) {
           TRITONBACKEND_Input* input;
           RESPOND_AND_SET_NULL_IF_ERROR(
-              &responses_[idx],
+              &responses[idx],
               TRITONBACKEND_RequestInput(requests[idx], name, &input));
           const int64_t* shape;
           uint32_t dims_count;
           RESPOND_AND_SET_NULL_IF_ERROR(
-              &responses_[idx], TRITONBACKEND_InputProperties(
+              &responses[idx], TRITONBACKEND_InputProperties(
                                    input, nullptr, nullptr, &shape, &dims_count,
                                    nullptr, nullptr));
 
-          batchn_shape_[0] += GetElementCount(shape, dims_count);
+          batchn_shape[0] += GetElementCount(shape, dims_count);
         }
       }
       // The shape for the entire input patch, [total_batch_size, ...]
       else {
-        batchn_shape_.assign(shape, shape + dims_count);
+        batchn_shape.assign(shape, shape + dims_count);
         if (max_batch_size != 0) {
-          batchn_shape_[0] = total_batch_size;
+          batchn_shape[0] = total_batch_size;
         }
       }
 
@@ -2210,23 +2210,23 @@ ModelInstanceState::ProcessRequests(
       // is set. If unable to create the tensor then fail all
       // requests.
       TRITONTF_Tensor* tensor = TRITONTF_TensorNew(
-          input_tensor_name, ConvertDataType(datatype), batchn_shape_.size(),
-          (batchn_shape_.size() == 0) ? nullptr : &batchn_shape_[0],
+          input_tensor_name, ConvertDataType(datatype), batchn_shape.size(),
+          (batchn_shape.size() == 0) ? nullptr : &batchn_shape[0],
           model_.input_device_id_);
       if (tensor == nullptr) {
         auto err = TRITONSERVER_ErrorNew(
             TRITONSERVER_ERROR_INTERNAL,
             (std::string("failed to create input tensor '") + name +
-             "' with shape " + backend::ShapeToString(batchn_shape_) +
+             "' with shape " + backend::ShapeToString(batchn_shape) +
              " and data type " + TRITONSERVER_DataTypeString(datatype) +
              " for '" + Name() + "'")
                 .c_str());
         // Send remaining responses and returned
         for (uint32_t r = 0; r < request_count; ++r) {
-          if (responses_[r] != nullptr) {
+          if (responses[r] != nullptr) {
             LOG_IF_ERROR(
                 TRITONBACKEND_ResponseSend(
-                    responses_[r], TRITONSERVER_RESPONSE_COMPLETE_FINAL, err),
+                    responses[r], TRITONSERVER_RESPONSE_COMPLETE_FINAL, err),
                 "failed to send TensorFlow backend response");
           }
 
@@ -2252,13 +2252,13 @@ ModelInstanceState::ProcessRequests(
         for (size_t idx = 0; idx < request_count; idx++) {
           TRITONBACKEND_Input* input;
           RESPOND_AND_SET_NULL_IF_ERROR(
-              &responses_[idx],
+              &responses[idx],
               TRITONBACKEND_RequestInput(requests[idx], name, &input));
           const int64_t* shape;
           uint32_t dims_count;
           uint32_t buffer_count;
           RESPOND_AND_SET_NULL_IF_ERROR(
-              &responses_[idx],
+              &responses[idx],
               TRITONBACKEND_InputPropertiesForHostPolicy(
                   input, host_policy_cstr, nullptr, nullptr, &shape,
                   &dims_count, nullptr, &buffer_count));
@@ -2267,7 +2267,7 @@ ModelInstanceState::ProcessRequests(
 
           cuda_copy |= SetStringInputTensor(
               tensor, input, name, buffer_count, batch_element_cnt,
-              tensor_offset, &responses_[idx], CudaStream(),
+              tensor_offset, &responses[idx], CudaStream(),
               host_policy_cstr);
           tensor_offset += batch_element_cnt;
         }
@@ -2293,8 +2293,9 @@ ModelInstanceState::ProcessRequests(
     }
 
     // Process batch input if any
+    std::vector<int64_t> shape;
     for (const auto& batch_input : StateForModel()->BatchInputs()) {
-      std::vector<int64_t> shape;
+      shape.clear();
       collector.BatchInputShape(batch_input, &shape);
 
       for (const auto& input_name : batch_input.TargetNames()) {
@@ -2324,10 +2325,10 @@ ModelInstanceState::ProcessRequests(
                   .c_str());
           // Send remaining responses and returned
           for (uint32_t r = 0; r < request_count; ++r) {
-            if (responses_[r] != nullptr) {
+            if (responses[r] != nullptr) {
               LOG_IF_ERROR(
                   TRITONBACKEND_ResponseSend(
-                      responses_[r], TRITONSERVER_RESPONSE_COMPLETE_FINAL, err),
+                      responses[r], TRITONSERVER_RESPONSE_COMPLETE_FINAL, err),
                   "failed to send TensorFlow backend response");
             }
 
@@ -2357,7 +2358,7 @@ ModelInstanceState::ProcessRequests(
         TRITONSERVER_MemoryType dst_memory_type;
         int64_t dst_memory_type_id;
         RESPOND_ALL_AND_SET_NULL_IF_ERROR(
-            responses_, responses_.size(),
+            responses, responses.size(),
             collector.ProcessBatchInput(
                 batch_input, TRITONTF_TensorData(tensor),
                 TRITONTF_TensorDataByteSize(tensor), allowed_input_types,
@@ -2381,44 +2382,44 @@ ModelInstanceState::ProcessRequests(
 
   // Collect the names of requested outputs. Do not include outputs
   // for requests that have already responded with an error.
-  required_outputs_.clear();
-  request_required_outputs_.clear();
-  request_outputs_start_.assign(request_count, 0);
-  request_outputs_count_.assign(request_count, 0);
+  std::vector<const char*> required_outputs;
+  std::vector<uint32_t> request_required_outputs;
+  std::vector<uint32_t> request_outputs_start(request_count);
+  std::vector<uint32_t> request_outputs_count(request_count);
 
   // Pre-allocate to prevent frequent re-allocations.
-  request_required_outputs_.reserve(request_count * 4); // Guess 4 outputs per request avg
+  request_required_outputs.reserve(request_count * 4); // Guess 4 outputs per request avg
 
   for (size_t idx = 0; idx < request_count; idx++) {
     const auto& request = requests[idx];
-    auto& response = responses_[idx];
+    auto& response = responses[idx];
     if (response != nullptr) {
       uint32_t output_count;
       RESPOND_AND_SET_NULL_IF_ERROR(
           &response, TRITONBACKEND_RequestOutputCount(request, &output_count));
       if (response != nullptr) {
-        request_outputs_start_[idx] = request_required_outputs_.size();
-        request_outputs_count_[idx] = 0;
+        request_outputs_start[idx] = request_required_outputs.size();
+        request_outputs_count[idx] = 0;
         for (uint32_t output_idx = 0; output_idx < output_count; output_idx++) {
           const char* output_name;
           RESPOND_AND_SET_NULL_IF_ERROR(
               &response, TRITONBACKEND_RequestOutputName(
                              request, output_idx, &output_name));
           if (response != nullptr) {
-            uint32_t req_out_idx = required_outputs_.size();
+            uint32_t req_out_idx = required_outputs.size();
             bool found = false;
-            for (uint32_t ro_idx = 0; ro_idx < required_outputs_.size(); ++ro_idx) {
-              if (std::strcmp(required_outputs_[ro_idx], output_name) == 0) {
+            for (uint32_t ro_idx = 0; ro_idx < required_outputs.size(); ++ro_idx) {
+              if (std::strcmp(required_outputs[ro_idx], output_name) == 0) {
                 req_out_idx = ro_idx;
                 found = true;
                 break;
               }
             }
             if (!found) {
-              required_outputs_.push_back(output_name);
+              required_outputs.push_back(output_name);
             }
-            request_required_outputs_.push_back(req_out_idx);
-            request_outputs_count_[idx]++;
+            request_required_outputs.push_back(req_out_idx);
+            request_outputs_count[idx]++;
           }
         }
       }
@@ -2427,15 +2428,15 @@ ModelInstanceState::ProcessRequests(
 
   // Create the vector of required output names using the names
   // expected by the model.
-  output_names_cstr_.clear();
-  output_names_cstr_.reserve(required_outputs_.size());
+  std::vector<const char*> output_names_cstr;
+  output_names_cstr.reserve(required_outputs.size());
   {
-    for (const char* name : required_outputs_) {
+    for (const char* name : required_outputs) {
       const auto& tn_itr = model_.output_name_map_.find(name);
       if (tn_itr == model_.output_name_map_.end()) {
-        output_names_cstr_.push_back(name);
+        output_names_cstr.push_back(name);
       } else {
-        output_names_cstr_.push_back(tn_itr->second.c_str());
+        output_names_cstr.push_back(tn_itr->second.c_str());
       }
     }
   }
@@ -2459,17 +2460,17 @@ ModelInstanceState::ProcessRequests(
 
     TRITONTF_Error* tf_err = TRITONTF_ModelRun(
         model_.tritontf_model_.get(), *(input_tensors.release()),
-        required_outputs_.size(), output_names_cstr_.data(), &rtl);
+        required_outputs.size(), output_names_cstr.data(), &rtl);
     if (tf_err != nullptr) {
       auto err =
           TRITONSERVER_ErrorNew(TRITONSERVER_ERROR_INTERNAL, tf_err->msg_);
       TRITONTF_ErrorDelete(tf_err);
       // Send remaining responses and returned
       for (uint32_t r = 0; r < request_count; ++r) {
-        if (responses_[r] != nullptr) {
+        if (responses[r] != nullptr) {
           LOG_IF_ERROR(
               TRITONBACKEND_ResponseSend(
-                  responses_[r], TRITONSERVER_RESPONSE_COMPLETE_FINAL, err),
+                  responses[r], TRITONSERVER_RESPONSE_COMPLETE_FINAL, err),
               "failed to send TensorFlow backend response");
         }
 
@@ -2493,10 +2494,10 @@ ModelInstanceState::ProcessRequests(
   // ourselves since we must use TF-specific string tensor APIs.
   cuda_copy = false;
   // The serialized string buffer must be valid until output copies are done
-  string_buffer_.clear();
-  string_buffer_.reserve(request_count * required_outputs_.size());
+  std::vector<std::string> string_buffer;
+  string_buffer.reserve(request_count * required_outputs.size());
   BackendOutputResponder responder(
-      requests, request_count, &responses_,
+      requests, request_count, &responses,
       StateForModel()->TritonMemoryManager(), max_batch_size > 0,
       StateForModel()->EnablePinnedOutput(), CudaStream());
   {
@@ -2506,9 +2507,9 @@ ModelInstanceState::ProcessRequests(
     // batchn_shape holds the shape of the entire tensor batch, but
     // is overwritten below and used as the shape for each response
     // output.
-    batchn_shape_.clear();
+    std::vector<int64_t> batchn_shape;
 
-    for (const char* name : required_outputs_) {
+    for (const char* name : required_outputs) {
       TRITONTF_Tensor* output_tensor = output_tensor_itr->tensor_;
 
       const BatchOutput* batch_output = StateForModel()->FindBatchOutput(name);
@@ -2518,28 +2519,28 @@ ModelInstanceState::ProcessRequests(
 
         const TRITONSERVER_DataType datatype = ConvertDataType(tf_datatype);
 
-        batchn_shape_.assign(tf_shape->dims_, tf_shape->dims_ + tf_shape->rank_);
+        batchn_shape.assign(tf_shape->dims_, tf_shape->dims_ + tf_shape->rank_);
 
         // Custom handling for string/bytes tensor...
         if (datatype == TRITONSERVER_TYPE_BYTES) {
           size_t tensor_offset = 0;
 
-          for (size_t idx = 0; idx < responses_.size(); idx++) {
-            auto& response = responses_[idx];
+          for (size_t idx = 0; idx < responses.size(); idx++) {
+            auto& response = responses[idx];
 
             if (max_batch_size != 0) {
-              batchn_shape_[0] = request_batch_sizes_[idx];
+              batchn_shape[0] = request_batch_sizes[idx];
             }
 
-            const size_t tensor_element_cnt = GetElementCount(batchn_shape_);
+            const size_t tensor_element_cnt = GetElementCount(batchn_shape);
 
             // Only need an response tensor for requested outputs.
             bool is_requested = false;
             if (response != nullptr) {
-              uint32_t start_idx = request_outputs_start_[idx];
-              uint32_t count = request_outputs_count_[idx];
+              uint32_t start_idx = request_outputs_start[idx];
+              uint32_t count = request_outputs_count[idx];
               for (uint32_t i = 0; i < count; ++i) {
-                if (request_required_outputs_[start_idx + i] == out_idx) {
+                if (request_required_outputs[start_idx + i] == out_idx) {
                   is_requested = true;
                   break;
                 }
@@ -2552,11 +2553,11 @@ ModelInstanceState::ProcessRequests(
                   &response,
                   TRITONBACKEND_ResponseOutput(
                       response, &response_output, name, datatype,
-                      batchn_shape_.data(), batchn_shape_.size()));
-              string_buffer_.emplace_back();
+                      batchn_shape.data(), batchn_shape.size()));
+              string_buffer.emplace_back();
               cuda_copy |= SetStringOutputBuffer(
                   output_tensor, &response, response_output, tensor_element_cnt,
-                  tensor_offset, CudaStream(), &string_buffer_.back());
+                  tensor_offset, CudaStream(), &string_buffer.back());
             }
 
             tensor_offset += tensor_element_cnt;
@@ -2565,7 +2566,7 @@ ModelInstanceState::ProcessRequests(
         // Use the responder for non-STRING datatype...
         else {  // datatype != DataType::TYPE_STRING
           responder.ProcessTensor(
-              name, datatype, batchn_shape_, TRITONTF_TensorData(output_tensor),
+              name, datatype, batchn_shape, TRITONTF_TensorData(output_tensor),
               (TRITONTF_TensorIsGPUTensor(output_tensor))
                   ? TRITONSERVER_MEMORY_GPU
                   : TRITONSERVER_MEMORY_CPU,
@@ -2610,7 +2611,7 @@ ModelInstanceState::ProcessRequests(
   // an earlier error. Note that the responses are not set to nullptr
   // here as we need that indication below to determine if the request
   // we successful or not.
-  for (auto& response : responses_) {
+  for (auto& response : responses) {
     if (response != nullptr) {
       LOG_IF_ERROR(
           TRITONBACKEND_ResponseSend(
@@ -2625,7 +2626,7 @@ ModelInstanceState::ProcessRequests(
     LOG_IF_ERROR(
         TRITONBACKEND_ModelInstanceReportStatistics(
             TritonModelInstance(), request,
-            (responses_[r] != nullptr) /* success */, exec_start_ns,
+            (responses[r] != nullptr) /* success */, exec_start_ns,
             compute_start_ns, compute_end_ns, exec_end_ns),
         "failed reporting request statistics");
 

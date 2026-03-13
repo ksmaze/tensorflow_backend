@@ -616,7 +616,9 @@ SetStringInputTensor(
     TRITONTF_Tensor* tensor, TRITONBACKEND_Input* input, const char* name,
     const uint32_t buffer_count, const size_t request_element_cnt,
     const size_t tensor_offset, TRITONBACKEND_Response** response,
-    cudaStream_t stream, const char* host_policy_name)
+    cudaStream_t stream, const char* host_policy_name,
+    std::vector<std::pair<const char*, const uint32_t>>& str_list,
+    std::vector<const char*>& str_ptrs, std::vector<size_t>& str_lens)
 {
   bool cuda_copy = false;
 
@@ -645,7 +647,7 @@ SetStringInputTensor(
   }
 #endif  // TRITON_ENABLE_GPU
 
-  std::vector<std::pair<const char*, const uint32_t>> str_list;
+  str_list.clear();
   err = ValidateStringBuffer(
       content, content_byte_size, request_element_cnt, name, &str_list);
   // Set string values using batch API to compute flat<tstring>() once.
@@ -663,8 +665,8 @@ SetStringInputTensor(
       }
       TRITONTF_TensorSetStrings(tensor, tensor_offset, n, ptrs, lens);
     } else {
-      std::vector<const char*> str_ptrs(n);
-      std::vector<size_t> str_lens(n);
+      str_ptrs.resize(n);
+      str_lens.resize(n);
       for (size_t i = 0; i < n; ++i) {
         str_ptrs[i] = str_list[i].first;
         str_lens[i] = str_list[i].second;
@@ -2121,6 +2123,13 @@ ModelInstanceState::ProcessRequests(
   // must use TF-specific string tensor APIs.
   bool cuda_copy = false;
 
+  // Reusable buffers for string input processing. Declared here so that
+  // capacity is retained across all inputs and requests, eliminating
+  // per-call heap allocations in SetStringInputTensor.
+  std::vector<std::pair<const char*, const uint32_t>> str_buf_list;
+  std::vector<const char*> str_buf_ptrs;
+  std::vector<size_t> str_buf_lens;
+
   BackendInputCollector collector(
       requests, request_count, &responses,
       StateForModel()->TritonMemoryManager(),
@@ -2248,7 +2257,7 @@ ModelInstanceState::ProcessRequests(
           cuda_copy |= SetStringInputTensor(
               tensor, input, name, buffer_count, batch_element_cnt,
               tensor_offset, &responses[idx], CudaStream(),
-              host_policy_cstr);
+              host_policy_cstr, str_buf_list, str_buf_ptrs, str_buf_lens);
           tensor_offset += batch_element_cnt;
         }
       }

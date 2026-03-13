@@ -30,3 +30,12 @@
 3. **Combined TRITONTF_Shape allocation** — `TRITONTF_ShapeNew` now allocates the shape struct and dims array in a single `operator new` call instead of two separate allocations. `TRITONTF_ShapeDelete` uses a single `operator delete`. Eliminates 800+ extra malloc calls per execute.
 4. **Thread-local TensorList node free list** — `TRITONTF_TensorListNew`/`Delete` now use a thread-local free list to recycle nodes. After warmup, zero malloc/free calls for TensorList nodes. Eliminates ~800 malloc + 800 free calls per execute per thread.
 5. **Eliminated vector<string> in TRITONTF_ModelRun** — `ModelImpl::Run` now accepts `const char**` + counts directly. Input count is passed from `TRITONTF_ModelRun` to avoid re-traversing the 800+ node linked list. `vector<string>` for output names is only built in the non-callable path where `session_->Run` requires it.
+
+## 2026-03-13 - Callable on CPU: No Measurable Benefit — Reverted
+**Discovery:** Enabling `RunCallable` on CPU and all associated optimizations (feed_index stamping, feed_index_map_ keyed by config name, zero-string Run(), nullptr RunMetadata) produced **zero measurable latency improvement** over baseline `session_->Run` at concurrency=8, batch=25, 800+ string inputs.
+**Root cause:** TF's `session_->Run` already caches the execution plan after the first call via `GetOrCreateExecutors` in `direct_session.cc`. After warmup, `Run()` is just a hash-map lookup for the cached executor + positional tensor placement via `input_name_to_index`. Tensor names are short enough (~20 chars) for SSO — no heap allocation. The wrapper layer accounts for <1% of total latency; TF graph execution and string DATA copying (800 × 25 = 20,000 strings per inference) dominate.
+**Evidence from TF source:**
+- `direct_session.cc`: `executors_.find(key)` — O(1) cached executor lookup after first call
+- `direct_session.cc`: `feed_args[input_name_to_index[it.first]]` — TF already uses positional placement internally
+- `session.h`: `run_metadata` may be nullptr (documented, confirmed in implementation)
+**Action:** Reverted commits `7873ae4`..`ea0ede9` (callable-on-CPU, feed_index, ordering fixes). Kept this commit (`f14a917`) which has general-purpose optimizations that still reduce overhead for the `session_->Run` path: batch string API, combined shape allocation, thread-local TensorList free list, eliminated vector<string> in ModelRun.

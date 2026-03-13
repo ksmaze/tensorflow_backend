@@ -2186,16 +2186,12 @@ ModelInstanceState::ProcessRequests(
       }
 
       // The name of the input in the model can be different...
-      // In the callable path, RunCallable uses positional inputs so
-      // the tensor name is unused. Pass nullptr to skip name alloc.
-      const bool use_callable = model_.has_callable_;
-      const char* input_tensor_name = nullptr;
-      if (!use_callable) {
-        input_tensor_name = name;
-        const auto& tn_itr = model_.input_name_map_.find(name);
-        if (tn_itr != model_.input_name_map_.end()) {
-          input_tensor_name = tn_itr->second.c_str();
-        }
+      // Tensor names are needed for both the non-callable path (feed
+      // dict) and the callable path (input_index_map_ positioning).
+      const char* input_tensor_name = name;
+      const auto& tn_itr = model_.input_name_map_.find(name);
+      if (tn_itr != model_.input_name_map_.end()) {
+        input_tensor_name = tn_itr->second.c_str();
       }
 
       // Create a TF tensor to hold the entire input batch. Only try
@@ -2292,15 +2288,10 @@ ModelInstanceState::ProcessRequests(
 
       for (const auto& input_name : batch_input.TargetNames()) {
         // The name of the input in the model can be different...
-        // Skip name resolution in callable path (positional inputs).
-        const bool use_callable = model_.has_callable_;
-        const char* input_tensor_name = nullptr;
-        if (!use_callable) {
-          input_tensor_name = input_name.c_str();
-          const auto& tn_itr = model_.input_name_map_.find(input_name);
-          if (tn_itr != model_.input_name_map_.end()) {
-            input_tensor_name = tn_itr->second.c_str();
-          }
+        const char* input_tensor_name = input_name.c_str();
+        const auto& tn_itr = model_.input_name_map_.find(input_name);
+        if (tn_itr != model_.input_name_map_.end()) {
+          input_tensor_name = tn_itr->second.c_str();
         }
 
         // Create a TF tensor to hold the entire input batch. Only try

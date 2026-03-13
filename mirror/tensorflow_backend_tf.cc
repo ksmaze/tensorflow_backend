@@ -474,7 +474,7 @@ class TensorImpl {
 TensorImpl::TensorImpl(
     const char* name, TRITONTF_DataType dtype, TRITONTF_Shape* shape,
     const tensorflow::TensorShape& tfshape, const int tf_gpu_id)
-    : name_((name != nullptr) ? name : ""), dtype_(dtype), shape_(shape)
+    : name_(name), dtype_(dtype), shape_(shape)
 {
 #ifdef TRITON_ENABLE_GPU
   // Only request for GPU allocator for supported data type
@@ -605,8 +605,10 @@ class ModelImpl {
   bool has_callable_;
   std::string device_name_;
   tensorflow::Session::CallableHandle callable_;
-  // RunCallable will return all outputs specified in callable option in order,
-  // using map to quickly locate the requested output for each request.
+  // Maps feed/fetch names to their positional index in the callable.
+  // RunCallable uses positional I/O, so tensors must be placed at the
+  // correct index regardless of linked-list arrival order.
+  std::map<std::string, size_t> input_index_map_;
   std::map<std::string, size_t> output_index_map_;
 };
 
@@ -654,6 +656,9 @@ ModelImpl::MakeCallable(const tensorflow::CallableOptions& opts)
   }
 
   RETURN_IF_TF_ERROR(session_->MakeCallable(opts, &callable_));
+  for (int idx = 0; idx < opts.feed_size(); idx++) {
+    input_index_map_[opts.feed(idx)] = idx;
+  }
   for (int idx = 0; idx < opts.fetch_size(); idx++) {
     output_index_map_[opts.fetch(idx)] = idx;
   }
@@ -669,26 +674,21 @@ ModelImpl::Run(
 {
   // I/O needs to be prepared differently for callable
   if (has_callable_) {
-    std::vector<tensorflow::Tensor> tfinputs;
-    tfinputs.reserve(input_count);
-
+    // Place each tensor at its correct callable feed position using
+    // input_index_map_. The linked list order is arbitrary (prepend),
+    // so name-based positioning is required for correctness.
+    std::vector<tensorflow::Tensor> tfinputs(input_index_map_.size());
     for (TRITONTF_TensorList* itr = input_tensors; itr != nullptr;
          itr = itr->next_) {
       if (itr->tensor_ != nullptr) {
         TensorImpl* tensor = reinterpret_cast<TensorImpl*>(itr->tensor_);
-        tfinputs.emplace_back(std::move(tensor->TFTensor()));
+        auto it = input_index_map_.find(tensor->Name());
+        if (it != input_index_map_.end()) {
+          tfinputs[it->second] = std::move(tensor->TFTensor());
+        }
       }
     }
     TRITONTF_TensorListDelete(input_tensors);
-
-    // The input linked list is built by prepending in ProcessRequests,
-    // so it arrives in reverse order. Reverse to match the positional
-    // feed order registered during MakeCallable.
-    if (tfinputs.size() > 1) {
-      for (size_t i = 0, j = tfinputs.size() - 1; i < j; ++i, --j) {
-        std::swap(tfinputs[i], tfinputs[j]);
-      }
-    }
 
     tensorflow::RunMetadata meta_data;
     std::vector<tensorflow::Tensor> tfoutputs;

@@ -2180,18 +2180,10 @@ ModelInstanceState::ProcessRequests(
       }
 
       // The name of the input in the model can be different...
-      // In the callable path (input_device_id_ != MODEL_DEVICE),
-      // RunCallable uses positional inputs so the tensor name is unused.
-      // Pass nullptr to avoid string heap allocations per execute.
-      const bool use_callable =
-          (model_.input_device_id_ != ModelState::MODEL_DEVICE);
-      const char* input_tensor_name = nullptr;
-      if (!use_callable) {
-        input_tensor_name = name;
-        const auto& tn_itr = model_.input_name_map_.find(name);
-        if (tn_itr != model_.input_name_map_.end()) {
-          input_tensor_name = tn_itr->second.c_str();
-        }
+      const char* input_tensor_name = name;
+      const auto& tn_itr = model_.input_name_map_.find(input_tensor_name);
+      if (tn_itr != model_.input_name_map_.end()) {
+        input_tensor_name = tn_itr->second.c_str();
       }
 
       // Create a TF tensor to hold the entire input batch. Only try
@@ -2288,16 +2280,10 @@ ModelInstanceState::ProcessRequests(
 
       for (const auto& input_name : batch_input.TargetNames()) {
         // The name of the input in the model can be different...
-        // Skip name resolution in callable path (positional inputs).
-        const bool use_callable =
-            (model_.input_device_id_ != ModelState::MODEL_DEVICE);
-        const char* input_tensor_name = nullptr;
-        if (!use_callable) {
-          input_tensor_name = input_name.c_str();
-          const auto& tn_itr = model_.input_name_map_.find(input_name);
-          if (tn_itr != model_.input_name_map_.end()) {
-            input_tensor_name = tn_itr->second.c_str();
-          }
+        const char* input_tensor_name = input_name.c_str();
+        const auto& tn_itr = model_.input_name_map_.find(input_name);
+        if (tn_itr != model_.input_name_map_.end()) {
+          input_tensor_name = tn_itr->second.c_str();
         }
 
         // Create a TF tensor to hold the entire input batch. Only try

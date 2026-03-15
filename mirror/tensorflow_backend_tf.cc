@@ -453,6 +453,9 @@ class TensorImpl {
   // tensor elements. Using std::string causes static assertion failures in
   // tensorflow::DataTypeToEnum<std::string>.
   const tensorflow::tstring& String(size_t idx) const;
+  void Strings(
+      size_t start_idx, size_t count, const char** strs,
+      size_t* lengths) const;
   void SetString(size_t idx, const char* cstr, size_t length);
   void SetStrings(
       size_t start_idx, size_t count, const char* const* strs,
@@ -535,6 +538,19 @@ TensorImpl::String(size_t idx) const
 {
   auto flat = tftensor_.flat<tensorflow::tstring>();
   return flat(idx);
+}
+
+void
+TensorImpl::Strings(
+    size_t start_idx, size_t count, const char** strs, size_t* lengths) const
+{
+  auto flat = tftensor_.flat<tensorflow::tstring>();
+  for (size_t i = 0; i < count; ++i) {
+    const size_t idx = start_idx + i;
+    const tensorflow::tstring& str = flat(idx);
+    strs[i] = str.data();
+    lengths[i] = str.size();
+  }
 }
 
 void
@@ -975,6 +991,15 @@ TRITONTF_TensorString(TRITONTF_Tensor* tensor, size_t idx, size_t* length)
   const tensorflow::tstring& str = t->String(idx);
   *length = str.size();
   return str.data();
+}
+
+void
+TRITONTF_TensorStrings(
+    TRITONTF_Tensor* tensor, size_t start_idx, size_t count,
+    const char** strs, size_t* lengths)
+{
+  TensorImpl* t = reinterpret_cast<TensorImpl*>(tensor);
+  t->Strings(start_idx, count, strs, lengths);
 }
 
 void

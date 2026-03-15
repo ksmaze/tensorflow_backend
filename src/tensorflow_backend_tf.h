@@ -202,6 +202,14 @@ TRITONTF_EXPORT size_t TRITONTF_TensorDataByteSize(TRITONTF_Tensor* tensor);
 TRITONTF_EXPORT const char* TRITONTF_TensorString(
     TRITONTF_Tensor* tensor, size_t idx, size_t* length);
 
+// Batch-get multiple strings starting at 'start_idx'. Each entry in
+// 'strs' is populated with a pointer, and 'lengths' with the corresponding
+// length. This avoids the overhead of re-computing flat<tstring>() on every
+// individual call.
+TRITONTF_EXPORT void TRITONTF_TensorStrings(
+    TRITONTF_Tensor* tensor, size_t start_idx, size_t count,
+    const char** strs, size_t* lengths);
+
 // Set a string at a specified index within a tensor. Defined only for
 // string type.. bad things might happen if called for non-string type
 // tensor. The provided string is copied by the tensor so the caller

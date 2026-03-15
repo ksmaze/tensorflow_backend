@@ -698,12 +698,41 @@ SetStringOutputBuffer(
   // a 4-byte length followed by the string itself with no
   // null-terminator.
   serialized->clear();
+
+  // Use stack arrays for small counts (typical for scalar string outputs)
+  // to avoid heap allocations.
+  constexpr size_t kStackThreshold = 32;
+  const char** ptrs_ptr = nullptr;
+  size_t* lens_ptr = nullptr;
+  const char* stack_ptrs[kStackThreshold];
+  size_t stack_lens[kStackThreshold];
+  std::vector<const char*> heap_ptrs;
+  std::vector<size_t> heap_lens;
+
+  if (tensor_element_count <= kStackThreshold) {
+    ptrs_ptr = stack_ptrs;
+    lens_ptr = stack_lens;
+  } else {
+    heap_ptrs.resize(tensor_element_count);
+    heap_lens.resize(tensor_element_count);
+    ptrs_ptr = heap_ptrs.data();
+    lens_ptr = heap_lens.data();
+  }
+
+  TRITONTF_TensorStrings(
+      tensor, tensor_offset, tensor_element_count, ptrs_ptr, lens_ptr);
+
+  size_t total_length = 0;
   for (size_t e = 0; e < tensor_element_count; ++e) {
-    size_t len;
-    const char* cstr = TRITONTF_TensorString(tensor, tensor_offset + e, &len);
-    serialized->append(reinterpret_cast<const char*>(&len), sizeof(uint32_t));
-    if (len > 0) {
-      serialized->append(cstr, len);
+    total_length += sizeof(uint32_t) + lens_ptr[e];
+  }
+  serialized->reserve(total_length);
+
+  for (size_t e = 0; e < tensor_element_count; ++e) {
+    serialized->append(
+        reinterpret_cast<const char*>(&lens_ptr[e]), sizeof(uint32_t));
+    if (lens_ptr[e] > 0) {
+      serialized->append(ptrs_ptr[e], lens_ptr[e]);
     }
   }
 

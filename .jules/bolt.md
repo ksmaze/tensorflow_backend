@@ -39,3 +39,7 @@
 - `direct_session.cc`: `feed_args[input_name_to_index[it.first]]` — TF already uses positional placement internally
 - `session.h`: `run_metadata` may be nullptr (documented, confirmed in implementation)
 **Action:** Reverted commits `7873ae4`..`ea0ede9` (callable-on-CPU, feed_index, ordering fixes). Kept this commit (`f14a917`) which has general-purpose optimizations that still reduce overhead for the `session_->Run` path: batch string API, combined shape allocation, thread-local TensorList free list, eliminated vector<string> in ModelRun.
+
+## 2026-03-15 - [Batch Retrieval of String Tensors]
+**Learning:** In the string output serialization hot path (`SetStringOutputBuffer`), querying tensor elements one by one via `TRITONTF_TensorString` is extremely inefficient. Each call triggers `tftensor_.flat<tensorflow::tstring>()`, reconstructing the view and causing unnecessary overhead per element.
+**Action:** Always use batch access operations when crossing the backend/TF boundary. We introduced `TRITONTF_TensorStrings` to retrieve pointers and lengths in bulk using a single `flat` view computation, storing them in stack arrays (for small batches) or standard vectors (for larger batches) to avoid repeated view reconstructions and subsequent allocations.

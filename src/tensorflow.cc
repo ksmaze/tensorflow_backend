@@ -698,6 +698,16 @@ SetStringOutputBuffer(
   // a 4-byte length followed by the string itself with no
   // null-terminator.
   serialized->clear();
+
+  // Pre-calculate the total byte size to avoid repeated heap allocations
+  size_t total_size = 0;
+  for (size_t e = 0; e < tensor_element_count; ++e) {
+    size_t len;
+    TRITONTF_TensorString(tensor, tensor_offset + e, &len);
+    total_size += sizeof(uint32_t) + len;
+  }
+  serialized->reserve(total_size);
+
   for (size_t e = 0; e < tensor_element_count; ++e) {
     size_t len;
     const char* cstr = TRITONTF_TensorString(tensor, tensor_offset + e, &len);
@@ -2274,9 +2284,11 @@ ModelInstanceState::ProcessRequests(
     }
 
     // Process batch input if any
+    std::vector<int64_t> batch_input_shape;
+    std::vector<std::pair<TRITONSERVER_MemoryType, int64_t>> allowed_input_types;
     for (const auto& batch_input : StateForModel()->BatchInputs()) {
-      std::vector<int64_t> shape;
-      collector.BatchInputShape(batch_input, &shape);
+      batch_input_shape.clear();
+      collector.BatchInputShape(batch_input, &batch_input_shape);
 
       for (const auto& input_name : batch_input.TargetNames()) {
         // The name of the input in the model can be different...
@@ -2292,13 +2304,13 @@ ModelInstanceState::ProcessRequests(
         // requests.
         TRITONTF_Tensor* tensor = TRITONTF_TensorNew(
             input_tensor_name, ConvertDataType(batch_input.DataType()),
-            shape.size(), (shape.size() == 0) ? nullptr : &shape[0],
+            batch_input_shape.size(), (batch_input_shape.size() == 0) ? nullptr : &batch_input_shape[0],
             model_.input_device_id_);
         if (tensor == nullptr) {
           auto err = TRITONSERVER_ErrorNew(
               TRITONSERVER_ERROR_INTERNAL,
               (std::string("failed to create input tensor '") + input_name +
-               "' with shape " + backend::ShapeToString(shape) +
+               "' with shape " + backend::ShapeToString(batch_input_shape) +
                " and data type " +
                TRITONSERVER_DataTypeString(batch_input.DataType()) + " for '" +
                Name() + "'")
@@ -2320,12 +2332,11 @@ ModelInstanceState::ProcessRequests(
           TRITONSERVER_ErrorDelete(err);
           return;
         }
-        std::vector<std::pair<TRITONSERVER_MemoryType, int64_t>>
-            allowed_input_types;
+        allowed_input_types.clear();
         if (TRITONTF_TensorIsGPUTensor(tensor)) {
-          allowed_input_types = {{TRITONSERVER_MEMORY_GPU, DeviceId()}};
+          allowed_input_types.emplace_back(TRITONSERVER_MEMORY_GPU, DeviceId());
         } else {
-          allowed_input_types = {{TRITONSERVER_MEMORY_CPU, 0}};
+          allowed_input_types.emplace_back(TRITONSERVER_MEMORY_CPU, 0);
         }
 
         // Add the new TF tensor to the list of TF inputs.
@@ -2363,12 +2374,14 @@ ModelInstanceState::ProcessRequests(
   // Collect the names of requested outputs. Do not include outputs
   // for requests that have already responded with an error.
   std::vector<const char*> required_outputs;
+  std::vector<std::pair<const char*, uint32_t>> sorted_required_outputs;
   std::vector<uint32_t> request_required_outputs;
   std::vector<uint32_t> request_outputs_start(request_count);
   std::vector<uint32_t> request_outputs_count(request_count);
 
   // Pre-allocate to prevent frequent re-allocations.
   request_required_outputs.reserve(request_count * 4); // Guess 4 outputs per request avg
+  sorted_required_outputs.reserve(16); // Guess some reasonable size
 
   for (size_t idx = 0; idx < request_count; idx++) {
     const auto& request = requests[idx];
@@ -2386,17 +2399,19 @@ ModelInstanceState::ProcessRequests(
               &response, TRITONBACKEND_RequestOutputName(
                              request, output_idx, &output_name));
           if (response != nullptr) {
-            uint32_t req_out_idx = required_outputs.size();
-            bool found = false;
-            for (uint32_t ro_idx = 0; ro_idx < required_outputs.size(); ++ro_idx) {
-              if (std::strcmp(required_outputs[ro_idx], output_name) == 0) {
-                req_out_idx = ro_idx;
-                found = true;
-                break;
-              }
-            }
-            if (!found) {
+            auto it = std::lower_bound(
+                sorted_required_outputs.begin(), sorted_required_outputs.end(),
+                output_name,
+                [](const std::pair<const char*, uint32_t>& a, const char* b) {
+                  return std::strcmp(a.first, b) < 0;
+                });
+            uint32_t req_out_idx;
+            if (it != sorted_required_outputs.end() && std::strcmp(it->first, output_name) == 0) {
+              req_out_idx = it->second;
+            } else {
+              req_out_idx = required_outputs.size();
               required_outputs.push_back(output_name);
+              sorted_required_outputs.insert(it, std::make_pair(output_name, req_out_idx));
             }
             request_required_outputs.push_back(req_out_idx);
             request_outputs_count[idx]++;

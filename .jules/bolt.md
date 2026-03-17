@@ -39,3 +39,7 @@
 - `direct_session.cc`: `feed_args[input_name_to_index[it.first]]` — TF already uses positional placement internally
 - `session.h`: `run_metadata` may be nullptr (documented, confirmed in implementation)
 **Action:** Reverted commits `7873ae4`..`ea0ede9` (callable-on-CPU, feed_index, ordering fixes). Kept this commit (`f14a917`) which has general-purpose optimizations that still reduce overhead for the `session_->Run` path: batch string API, combined shape allocation, thread-local TensorList free list, eliminated vector<string> in ModelRun.
+
+## 2026-03-14 - Zero-Copy String Tensor Serialization in Output Path
+**Learning:** Constructing `std::string` values for output tensors sequentially and storing them in an intermediate `std::vector<std::string>` on the CPU path causes numerous unnecessary heap allocations when strings exceed SSO, wasting cycles and fragmenting heap memory in the hot path.
+**Action:** When copying string tensors to Triton CPU response buffers, calculate the total serialized byte size upfront, allocate the Triton buffer, and copy memory directly into the destination pointer.

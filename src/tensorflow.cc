@@ -694,17 +694,12 @@ SetStringOutputBuffer(
 {
   bool cuda_copy = false;
 
-  // Serialize the output tensor strings. Each string is serialized as
-  // a 4-byte length followed by the string itself with no
-  // null-terminator.
-  serialized->clear();
+  // Calculate the total byte size of the serialized tensor.
+  size_t total_byte_size = 0;
   for (size_t e = 0; e < tensor_element_count; ++e) {
     size_t len;
-    const char* cstr = TRITONTF_TensorString(tensor, tensor_offset + e, &len);
-    serialized->append(reinterpret_cast<const char*>(&len), sizeof(uint32_t));
-    if (len > 0) {
-      serialized->append(cstr, len);
-    }
+    TRITONTF_TensorString(tensor, tensor_offset + e, &len);
+    total_byte_size += sizeof(uint32_t) + len;
   }
 
   // Allocate a buffer large enough to hold the serialized tensor.
@@ -713,25 +708,53 @@ SetStringOutputBuffer(
 
   void* buffer;
   auto err = TRITONBACKEND_OutputBuffer(
-      response_output, &buffer, serialized->size(), &actual_memory_type,
+      response_output, &buffer, total_byte_size, &actual_memory_type,
       &actual_memory_type_id);
   if (err != nullptr) {
     RESPOND_AND_SET_NULL_IF_ERROR(response, err);
     return cuda_copy;
   }
 
-  // Copy the serialized tensor into the allocated buffer.
-  bool cuda_used = false;
-  err = CopyBuffer(
-      "String output", TRITONSERVER_MEMORY_CPU /* src_memory_type */,
-      0 /* src_memory_type_id */, actual_memory_type, actual_memory_type_id,
-      serialized->size(), reinterpret_cast<const void*>(serialized->c_str()),
-      buffer, stream, &cuda_used);
-  cuda_copy |= cuda_used;
+  if (actual_memory_type == TRITONSERVER_MEMORY_CPU) {
+    // Copy the serialized tensor directly into the allocated CPU buffer.
+    char* dst = reinterpret_cast<char*>(buffer);
+    for (size_t e = 0; e < tensor_element_count; ++e) {
+      size_t len;
+      const char* cstr = TRITONTF_TensorString(tensor, tensor_offset + e, &len);
+      uint32_t len32 = len;
+      memcpy(dst, &len32, sizeof(uint32_t));
+      dst += sizeof(uint32_t);
+      if (len > 0) {
+        memcpy(dst, cstr, len);
+        dst += len;
+      }
+    }
+  } else {
+    // If output buffer is GPU, serialize to std::string so it outlives the async copy
+    serialized->clear();
+    serialized->reserve(total_byte_size);
+    for (size_t e = 0; e < tensor_element_count; ++e) {
+      size_t len;
+      const char* cstr = TRITONTF_TensorString(tensor, tensor_offset + e, &len);
+      uint32_t len32 = len;
+      serialized->append(reinterpret_cast<const char*>(&len32), sizeof(uint32_t));
+      if (len > 0) {
+        serialized->append(cstr, len);
+      }
+    }
 
-  if (err != nullptr) {
-    RESPOND_AND_SET_NULL_IF_ERROR(response, err);
-    return cuda_copy;
+    bool cuda_used = false;
+    err = CopyBuffer(
+        "String output", TRITONSERVER_MEMORY_CPU /* src_memory_type */,
+        0 /* src_memory_type_id */, actual_memory_type, actual_memory_type_id,
+        total_byte_size, reinterpret_cast<const void*>(serialized->c_str()),
+        buffer, stream, &cuda_used);
+    cuda_copy |= cuda_used;
+
+    if (err != nullptr) {
+      RESPOND_AND_SET_NULL_IF_ERROR(response, err);
+      return cuda_copy;
+    }
   }
 
   return cuda_copy;

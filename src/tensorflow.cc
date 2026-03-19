@@ -1994,6 +1994,33 @@ ModelInstanceState::ModelInstanceState(
 {
 }
 
+TRITONSERVER_Error*
+GetInput(
+    TRITONBACKEND_Request* request, const char* name,
+    const uint32_t expected_idx, TRITONBACKEND_Input** input)
+{
+  // Fast path: attempt to look up the input by index and match by name
+  // to avoid O(N) string comparisons over the request's inputs (where
+  // TRITONBACKEND_RequestInput performs a linear search). This changes
+  // the O(N^2) complexity to O(N) when iterating over request inputs.
+  auto err = TRITONBACKEND_RequestInputByIndex(request, expected_idx, input);
+  if (err == nullptr) {
+    const char* input_name;
+    auto prop_err = TRITONBACKEND_InputProperties(
+        *input, &input_name, nullptr, nullptr, nullptr, nullptr, nullptr);
+    if (prop_err == nullptr) {
+      if (std::strcmp(input_name, name) == 0) {
+        return nullptr;
+      }
+    } else {
+      TRITONSERVER_ErrorDelete(prop_err);
+    }
+  } else {
+    TRITONSERVER_ErrorDelete(err);
+  }
+  return TRITONBACKEND_RequestInput(request, name, input);
+}
+
 void
 ModelInstanceState::ProcessRequests(
     TRITONBACKEND_Request** requests, const uint32_t request_count)
@@ -2160,7 +2187,7 @@ ModelInstanceState::ProcessRequests(
           TRITONBACKEND_Input* input;
           RESPOND_AND_SET_NULL_IF_ERROR(
               &responses[idx],
-              TRITONBACKEND_RequestInput(requests[idx], name, &input));
+              GetInput(requests[idx], name, input_idx, &input));
           const int64_t* shape;
           uint32_t dims_count;
           RESPOND_AND_SET_NULL_IF_ERROR(
@@ -2234,7 +2261,7 @@ ModelInstanceState::ProcessRequests(
           TRITONBACKEND_Input* input;
           RESPOND_AND_SET_NULL_IF_ERROR(
               &responses[idx],
-              TRITONBACKEND_RequestInput(requests[idx], name, &input));
+              GetInput(requests[idx], name, input_idx, &input));
           const int64_t* shape;
           uint32_t dims_count;
           uint32_t buffer_count;

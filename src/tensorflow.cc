@@ -548,6 +548,11 @@ GetContiguousInputContent(
   size_t chunk_count = 0;
   bool type_mismatch = false;
   uint64_t total_byte_size = 0;
+
+  // Cache the first valid pointer so we can avoid querying it again when
+  // chunk_count == 1
+  const void* first_src_ptr = nullptr;
+
   for (size_t idx = 0; idx < buffer_count; ++idx) {
     TRITONSERVER_MemoryType src_memory_type;
     int64_t src_memory_type_id;
@@ -559,6 +564,9 @@ GetContiguousInputContent(
         &src_memory_type, &src_memory_type_id));
 
     if (src_ptr != nullptr) {
+      if (chunk_count == 0) {
+        first_src_ptr = src_ptr;
+      }
       chunk_count++;
       total_byte_size += src_byte_size;
       type_mismatch |= (src_memory_type == TRITONSERVER_MEMORY_GPU);
@@ -569,11 +577,8 @@ GetContiguousInputContent(
     *content = nullptr;
     *content_byte_size = 0;
   } else if ((chunk_count == 1) && !type_mismatch) {
-    TRITONSERVER_MemoryType src_memory_type;
-    int64_t src_memory_type_id;
-    RETURN_IF_ERROR(TRITONBACKEND_InputBufferForHostPolicy(
-        rinput, host_policy_name, 0, (const void**)content, content_byte_size,
-        &src_memory_type, &src_memory_type_id));
+    *content = reinterpret_cast<const char*>(first_src_ptr);
+    *content_byte_size = total_byte_size;
   } else {
     *contiguous_buffer = (char*)malloc(total_byte_size);
 
@@ -1997,7 +2002,9 @@ ModelInstanceState::ModelInstanceState(
 TRITONSERVER_Error*
 GetInput(
     TRITONBACKEND_Request* request, const char* name,
-    const uint32_t expected_idx, TRITONBACKEND_Input** input)
+    const uint32_t expected_idx, TRITONBACKEND_Input** input,
+    const int64_t** shape = nullptr, uint32_t* dims_count = nullptr,
+    uint32_t* buffer_count = nullptr, const char* host_policy_name = nullptr)
 {
   // Fast path: attempt to look up the input by index and match by name
   // to avoid O(N) string comparisons over the request's inputs (where
@@ -2006,8 +2013,17 @@ GetInput(
   auto err = TRITONBACKEND_RequestInputByIndex(request, expected_idx, input);
   if (err == nullptr) {
     const char* input_name;
-    auto prop_err = TRITONBACKEND_InputProperties(
-        *input, &input_name, nullptr, nullptr, nullptr, nullptr, nullptr);
+    TRITONSERVER_Error* prop_err;
+    if (host_policy_name != nullptr) {
+      prop_err = TRITONBACKEND_InputPropertiesForHostPolicy(
+          *input, host_policy_name, &input_name, nullptr, shape, dims_count,
+          nullptr, buffer_count);
+    } else {
+      prop_err = TRITONBACKEND_InputProperties(
+          *input, &input_name, nullptr, shape, dims_count, nullptr,
+          buffer_count);
+    }
+
     if (prop_err == nullptr) {
       if (std::strcmp(input_name, name) == 0) {
         return nullptr;
@@ -2018,7 +2034,27 @@ GetInput(
   } else {
     TRITONSERVER_ErrorDelete(err);
   }
-  return TRITONBACKEND_RequestInput(request, name, input);
+
+  // Fallback to linear search
+  auto fallback_err = TRITONBACKEND_RequestInput(request, name, input);
+  if (fallback_err != nullptr) {
+    return fallback_err;
+  }
+
+  // If properties were requested, fetch them for the fallback input
+  if (shape != nullptr || dims_count != nullptr || buffer_count != nullptr) {
+    if (host_policy_name != nullptr) {
+      return TRITONBACKEND_InputPropertiesForHostPolicy(
+          *input, host_policy_name, nullptr, nullptr, shape, dims_count,
+          nullptr, buffer_count);
+    } else {
+      return TRITONBACKEND_InputProperties(
+          *input, nullptr, nullptr, shape, dims_count, nullptr,
+          buffer_count);
+    }
+  }
+
+  return nullptr;
 }
 
 void
@@ -2185,15 +2221,11 @@ ModelInstanceState::ProcessRequests(
         batchn_shape.push_back(0);
         for (size_t idx = 0; idx < request_count; idx++) {
           TRITONBACKEND_Input* input;
-          RESPOND_AND_SET_NULL_IF_ERROR(
-              &responses[idx],
-              GetInput(requests[idx], name, input_idx, &input));
           const int64_t* shape;
           uint32_t dims_count;
           RESPOND_AND_SET_NULL_IF_ERROR(
-              &responses[idx], TRITONBACKEND_InputProperties(
-                                   input, nullptr, nullptr, &shape, &dims_count,
-                                   nullptr, nullptr));
+              &responses[idx],
+              GetInput(requests[idx], name, input_idx, &input, &shape, &dims_count));
 
           batchn_shape[0] += GetElementCount(shape, dims_count);
         }
@@ -2259,17 +2291,12 @@ ModelInstanceState::ProcessRequests(
 
         for (size_t idx = 0; idx < request_count; idx++) {
           TRITONBACKEND_Input* input;
-          RESPOND_AND_SET_NULL_IF_ERROR(
-              &responses[idx],
-              GetInput(requests[idx], name, input_idx, &input));
           const int64_t* shape;
           uint32_t dims_count;
           uint32_t buffer_count;
           RESPOND_AND_SET_NULL_IF_ERROR(
               &responses[idx],
-              TRITONBACKEND_InputPropertiesForHostPolicy(
-                  input, host_policy_cstr, nullptr, nullptr, &shape,
-                  &dims_count, nullptr, &buffer_count));
+              GetInput(requests[idx], name, input_idx, &input, &shape, &dims_count, &buffer_count, host_policy_cstr));
 
           const int64_t batch_element_cnt = GetElementCount(shape, dims_count);
 

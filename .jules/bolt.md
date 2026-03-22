@@ -47,3 +47,7 @@
 ## 2026-03-20 - [Redundant Triton API Calls in Hot Path]
 **Learning:** Discovered that `ProcessRequests` was making redundant C API calls across the Triton boundary. `GetInput` was calling `TRITONBACKEND_InputProperties` just to verify the tensor name, and then the caller was invoking it *again* to get the shape and dimensions. Similarly, `GetContiguousInputContent` was iterating over buffers using `TRITONBACKEND_InputBufferForHostPolicy` and then calling it a second time to fetch the exact same pointer when `chunk_count == 1`.
 **Action:** Always fuse API calls where possible. Modify helper functions like `GetInput` to return all necessary properties (shape, dims_count, etc.) during their internal verification step. Cache outputs of iteration loops (like the first valid buffer pointer) to avoid re-querying the API for the exact same data immediately afterward.
+
+## 2024-05-18 - [Triton C++ TF Backend API Optimization]
+**Learning:** Calling `TRITONBACKEND_InputBufferForHostPolicy` redundantly in loops (like in `GetContiguousInputContent` when `chunk_count > 1`) introduces significant overhead for models with numerous fragmented input buffers.
+**Action:** Always cache the buffer properties (`src_ptr`, `src_byte_size`, `src_memory_type`, `src_memory_type_id`) locally on the first pass (e.g. using a stack-allocated buffer array for small counts and falling back to a `std::vector`) to avoid O(N) redundant C API calls and safely iterate through contiguous memory checks.

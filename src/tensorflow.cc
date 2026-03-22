@@ -553,6 +553,26 @@ GetContiguousInputContent(
   // chunk_count == 1
   const void* first_src_ptr = nullptr;
 
+  // Bolt Optimization: Cache buffer metadata in a stack-allocated array
+  // to avoid redundant O(N) calls to TRITONBACKEND_InputBufferForHostPolicy.
+  // This eliminates API overhead and safely handles fragmented memory chunks.
+  struct BufferInfo {
+    const void* ptr;
+    size_t byte_size;
+    TRITONSERVER_MemoryType memory_type;
+    int64_t memory_type_id;
+  };
+
+  constexpr size_t kInlineCacheSize = 32;
+  BufferInfo inline_buffers[kInlineCacheSize];
+  std::vector<BufferInfo> heap_buffers;
+  BufferInfo* buffers = inline_buffers;
+
+  if (buffer_count > kInlineCacheSize) {
+    heap_buffers.resize(buffer_count);
+    buffers = heap_buffers.data();
+  }
+
   for (size_t idx = 0; idx < buffer_count; ++idx) {
     TRITONSERVER_MemoryType src_memory_type;
     int64_t src_memory_type_id;
@@ -567,6 +587,8 @@ GetContiguousInputContent(
       if (chunk_count == 0) {
         first_src_ptr = src_ptr;
       }
+      buffers[chunk_count] = {
+          src_ptr, src_byte_size, src_memory_type, src_memory_type_id};
       chunk_count++;
       total_byte_size += src_byte_size;
       type_mismatch |= (src_memory_type == TRITONSERVER_MEMORY_GPU);
@@ -585,20 +607,14 @@ GetContiguousInputContent(
     size_t offset = 0;
     for (size_t i = 0; i < chunk_count; i++) {
       bool cuda_used;
-      TRITONSERVER_MemoryType src_memory_type;
-      int64_t src_memory_type_id;
-      size_t src_byte_size;
-      const void* src_ptr;
+      const auto& buf = buffers[i];
 
-      RETURN_IF_ERROR(TRITONBACKEND_InputBufferForHostPolicy(
-          rinput, host_policy_name, i, &src_ptr, &src_byte_size,
-          &src_memory_type, &src_memory_type_id));
       RETURN_IF_ERROR(CopyBuffer(
-          "Contiguous input", src_memory_type, src_memory_type_id,
-          TRITONSERVER_MEMORY_CPU, 0, src_byte_size, src_ptr,
+          "Contiguous input", buf.memory_type, buf.memory_type_id,
+          TRITONSERVER_MEMORY_CPU, 0, buf.byte_size, buf.ptr,
           *contiguous_buffer + offset, stream, &cuda_used));
       *cuda_copy |= cuda_used;
-      offset += src_byte_size;
+      offset += buf.byte_size;
     }
 
     *content = *contiguous_buffer;

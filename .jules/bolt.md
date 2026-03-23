@@ -39,7 +39,3 @@
 - `direct_session.cc`: `feed_args[input_name_to_index[it.first]]` — TF already uses positional placement internally
 - `session.h`: `run_metadata` may be nullptr (documented, confirmed in implementation)
 **Action:** Reverted commits `7873ae4`..`ea0ede9` (callable-on-CPU, feed_index, ordering fixes). Kept this commit (`f14a917`) which has general-purpose optimizations that still reduce overhead for the `session_->Run` path: batch string API, combined shape allocation, thread-local TensorList free list, eliminated vector<string> in ModelRun.
-
-## 2024-03-19 - O(N^2) Bottleneck in Request Input Retrieval
-**Learning:** Iterating over 800+ model inputs using `TRITONBACKEND_RequestInput` by name for every request inside `ProcessRequests` results in O(N^2) string comparisons, because `TRITONBACKEND_RequestInput` internally performs a linear search over the request's provided inputs.
-**Action:** Introduce a fast-path lookup using `TRITONBACKEND_RequestInputByIndex` to guess the input by index (O(1)) and verify the name using `TRITONBACKEND_InputProperties` (O(1)). Fall back to the linear `TRITONBACKEND_RequestInput` if the name doesn't match or the index lookup fails. Always remember to `TRITONSERVER_ErrorDelete` the error objects returned by failed fast-path API calls to avoid memory leaks.

@@ -39,3 +39,18 @@
 - `direct_session.cc`: `feed_args[input_name_to_index[it.first]]` — TF already uses positional placement internally
 - `session.h`: `run_metadata` may be nullptr (documented, confirmed in implementation)
 **Action:** Reverted commits `7873ae4`..`ea0ede9` (callable-on-CPU, feed_index, ordering fixes). Kept this commit (`f14a917`) which has general-purpose optimizations that still reduce overhead for the `session_->Run` path: batch string API, combined shape allocation, thread-local TensorList free list, eliminated vector<string> in ModelRun.
+
+## 2026-03-19 - O(N^2) Bottleneck in Request Input Retrieval
+**Learning:** Iterating over 800+ model inputs using `TRITONBACKEND_RequestInput` by name for every request inside `ProcessRequests` results in O(N^2) string comparisons, because `TRITONBACKEND_RequestInput` internally performs a linear search over the request's provided inputs.
+**Action:** Introduce a fast-path lookup using `TRITONBACKEND_RequestInputByIndex` to guess the input by index (O(1)) and verify the name using `TRITONBACKEND_InputProperties` (O(1)). Fall back to the linear `TRITONBACKEND_RequestInput` if the name doesn't match or the index lookup fails. Always remember to `TRITONSERVER_ErrorDelete` the error objects returned by failed fast-path API calls to avoid memory leaks.
+
+## 2026-03-20 - [Redundant Triton API Calls in Hot Path]
+**Learning:** Discovered that `ProcessRequests` was making redundant C API calls across the Triton boundary. `GetInput` was calling `TRITONBACKEND_InputProperties` just to verify the tensor name, and then the caller was invoking it *again* to get the shape and dimensions. Similarly, `GetContiguousInputContent` was iterating over buffers using `TRITONBACKEND_InputBufferForHostPolicy` and then calling it a second time to fetch the exact same pointer when `chunk_count == 1`.
+**Action:** Always fuse API calls where possible. Modify helper functions like `GetInput` to return all necessary properties (shape, dims_count, etc.) during their internal verification step. Cache outputs of iteration loops (like the first valid buffer pointer) to avoid re-querying the API for the exact same data immediately afterward.
+
+## 2026-03-21 - [Caching buffer iterations to avoid redundant C API calls]
+**Learning:** Found a performance bottleneck where `GetContiguousInputContent` iterated over `buffer_count` using `TRITONBACKEND_InputBufferForHostPolicy` and then redundantly iterated over it again when `chunk_count > 1`, resulting in extra C API cross-boundary overheads in the execution hot-path. Furthermore, the second loop incorrectly used `chunk_count` as the index instead of the original buffer index, introducing a latent bug if there were null pointers in the middle of the buffers.
+**Action:** Always fuse redundant iterations into a single pass when possible. Here, caching the results of the first API call inside a small stack-allocated `inline_buffers` array allows subsequent passes to avoid API overhead, prevent heap allocations (since typical buffer counts are small), and maintain correct logical mappings.
+
+## 2026-03-23 - Revert for regression
+**Learning:** Reverted commits between 2026-03-19 and 2026-03-21. They introduced a prediction performance regression, while did have latency improvements.

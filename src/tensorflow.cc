@@ -544,24 +544,36 @@ GetContiguousInputContent(
   *cuda_copy = false;
   *contiguous_buffer = nullptr;
 
+  struct BufferInfo {
+    const void* ptr;
+    size_t byte_size;
+    TRITONSERVER_MemoryType memory_type;
+    int64_t memory_type_id;
+  };
+
+  constexpr size_t inline_size = 32;
+  BufferInfo inline_buffers[inline_size];
+  std::vector<BufferInfo> heap_buffers;
+  BufferInfo* buffers = inline_buffers;
+
+  if (buffer_count > inline_size) {
+    heap_buffers.resize(buffer_count);
+    buffers = heap_buffers.data();
+  }
+
   // Check input buffers to see if data copy is necessary
   size_t chunk_count = 0;
   bool type_mismatch = false;
   uint64_t total_byte_size = 0;
   for (size_t idx = 0; idx < buffer_count; ++idx) {
-    TRITONSERVER_MemoryType src_memory_type;
-    int64_t src_memory_type_id;
-    size_t src_byte_size;
-    const void* src_ptr;
-
     RETURN_IF_ERROR(TRITONBACKEND_InputBufferForHostPolicy(
-        rinput, host_policy_name, idx, &src_ptr, &src_byte_size,
-        &src_memory_type, &src_memory_type_id));
+        rinput, host_policy_name, idx, &buffers[idx].ptr, &buffers[idx].byte_size,
+        &buffers[idx].memory_type, &buffers[idx].memory_type_id));
 
-    if (src_ptr != nullptr) {
+    if (buffers[idx].ptr != nullptr) {
       chunk_count++;
-      total_byte_size += src_byte_size;
-      type_mismatch |= (src_memory_type == TRITONSERVER_MEMORY_GPU);
+      total_byte_size += buffers[idx].byte_size;
+      type_mismatch |= (buffers[idx].memory_type == TRITONSERVER_MEMORY_GPU);
     }
   }
 
@@ -569,31 +581,27 @@ GetContiguousInputContent(
     *content = nullptr;
     *content_byte_size = 0;
   } else if ((chunk_count == 1) && !type_mismatch) {
-    TRITONSERVER_MemoryType src_memory_type;
-    int64_t src_memory_type_id;
-    RETURN_IF_ERROR(TRITONBACKEND_InputBufferForHostPolicy(
-        rinput, host_policy_name, 0, (const void**)content, content_byte_size,
-        &src_memory_type, &src_memory_type_id));
+    for (size_t idx = 0; idx < buffer_count; ++idx) {
+      if (buffers[idx].ptr != nullptr) {
+        *content = reinterpret_cast<const char*>(buffers[idx].ptr);
+        *content_byte_size = buffers[idx].byte_size;
+        break;
+      }
+    }
   } else {
     *contiguous_buffer = (char*)malloc(total_byte_size);
 
     size_t offset = 0;
-    for (size_t i = 0; i < chunk_count; i++) {
-      bool cuda_used;
-      TRITONSERVER_MemoryType src_memory_type;
-      int64_t src_memory_type_id;
-      size_t src_byte_size;
-      const void* src_ptr;
-
-      RETURN_IF_ERROR(TRITONBACKEND_InputBufferForHostPolicy(
-          rinput, host_policy_name, i, &src_ptr, &src_byte_size,
-          &src_memory_type, &src_memory_type_id));
-      RETURN_IF_ERROR(CopyBuffer(
-          "Contiguous input", src_memory_type, src_memory_type_id,
-          TRITONSERVER_MEMORY_CPU, 0, src_byte_size, src_ptr,
-          *contiguous_buffer + offset, stream, &cuda_used));
-      *cuda_copy |= cuda_used;
-      offset += src_byte_size;
+    for (size_t i = 0; i < buffer_count; i++) {
+      if (buffers[i].ptr != nullptr) {
+        bool cuda_used;
+        RETURN_IF_ERROR(CopyBuffer(
+            "Contiguous input", buffers[i].memory_type, buffers[i].memory_type_id,
+            TRITONSERVER_MEMORY_CPU, 0, buffers[i].byte_size, buffers[i].ptr,
+            *contiguous_buffer + offset, stream, &cuda_used));
+        *cuda_copy |= cuda_used;
+        offset += buffers[i].byte_size;
+      }
     }
 
     *content = *contiguous_buffer;
@@ -2158,9 +2166,31 @@ ModelInstanceState::ProcessRequests(
         batchn_shape.push_back(0);
         for (size_t idx = 0; idx < request_count; idx++) {
           TRITONBACKEND_Input* input;
-          RESPOND_AND_SET_NULL_IF_ERROR(
-              &responses[idx],
-              TRITONBACKEND_RequestInput(requests[idx], name, &input));
+          auto err = TRITONBACKEND_RequestInputByIndex(
+              requests[idx], input_idx, &input);
+          bool found_by_index = false;
+          if (err == nullptr) {
+            const char* input_name;
+            err = TRITONBACKEND_InputProperties(
+                input, &input_name, nullptr, nullptr, nullptr, nullptr,
+                nullptr);
+            if (err == nullptr && std::strcmp(input_name, name) == 0) {
+              found_by_index = true;
+            } else if (err != nullptr) {
+              TRITONSERVER_ErrorDelete(err);
+              err = nullptr;
+            }
+          } else {
+            TRITONSERVER_ErrorDelete(err);
+            err = nullptr;
+          }
+
+          if (!found_by_index) {
+            RESPOND_AND_SET_NULL_IF_ERROR(
+                &responses[idx],
+                TRITONBACKEND_RequestInput(requests[idx], name, &input));
+          }
+
           const int64_t* shape;
           uint32_t dims_count;
           RESPOND_AND_SET_NULL_IF_ERROR(
@@ -2232,9 +2262,31 @@ ModelInstanceState::ProcessRequests(
 
         for (size_t idx = 0; idx < request_count; idx++) {
           TRITONBACKEND_Input* input;
-          RESPOND_AND_SET_NULL_IF_ERROR(
-              &responses[idx],
-              TRITONBACKEND_RequestInput(requests[idx], name, &input));
+          auto err = TRITONBACKEND_RequestInputByIndex(
+              requests[idx], input_idx, &input);
+          bool found_by_index = false;
+          if (err == nullptr) {
+            const char* input_name;
+            err = TRITONBACKEND_InputProperties(
+                input, &input_name, nullptr, nullptr, nullptr, nullptr,
+                nullptr);
+            if (err == nullptr && std::strcmp(input_name, name) == 0) {
+              found_by_index = true;
+            } else if (err != nullptr) {
+              TRITONSERVER_ErrorDelete(err);
+              err = nullptr;
+            }
+          } else {
+            TRITONSERVER_ErrorDelete(err);
+            err = nullptr;
+          }
+
+          if (!found_by_index) {
+            RESPOND_AND_SET_NULL_IF_ERROR(
+                &responses[idx],
+                TRITONBACKEND_RequestInput(requests[idx], name, &input));
+          }
+
           const int64_t* shape;
           uint32_t dims_count;
           uint32_t buffer_count;

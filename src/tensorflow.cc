@@ -544,24 +544,40 @@ GetContiguousInputContent(
   *cuda_copy = false;
   *contiguous_buffer = nullptr;
 
+  struct BufferInfo {
+    const void* ptr;
+    size_t byte_size;
+    TRITONSERVER_MemoryType memory_type;
+    int64_t memory_type_id;
+  };
+
+  // Stack-allocate the buffer info to avoid heap allocations
+  // on typical inputs. Fall back to vector if buffer_count is unusually large.
+  constexpr size_t kStackThreshold = 32;
+  BufferInfo inline_buffers[kStackThreshold];
+  std::vector<BufferInfo> heap_buffers;
+  BufferInfo* cached_buffers = inline_buffers;
+
+  if (buffer_count > kStackThreshold) {
+    heap_buffers.resize(buffer_count);
+    cached_buffers = heap_buffers.data();
+  }
+
   // Check input buffers to see if data copy is necessary
   size_t chunk_count = 0;
   bool type_mismatch = false;
   uint64_t total_byte_size = 0;
   for (size_t idx = 0; idx < buffer_count; ++idx) {
-    TRITONSERVER_MemoryType src_memory_type;
-    int64_t src_memory_type_id;
-    size_t src_byte_size;
-    const void* src_ptr;
+    BufferInfo& info = cached_buffers[idx];
 
     RETURN_IF_ERROR(TRITONBACKEND_InputBufferForHostPolicy(
-        rinput, host_policy_name, idx, &src_ptr, &src_byte_size,
-        &src_memory_type, &src_memory_type_id));
+        rinput, host_policy_name, idx, &info.ptr, &info.byte_size,
+        &info.memory_type, &info.memory_type_id));
 
-    if (src_ptr != nullptr) {
+    if (info.ptr != nullptr) {
       chunk_count++;
-      total_byte_size += src_byte_size;
-      type_mismatch |= (src_memory_type == TRITONSERVER_MEMORY_GPU);
+      total_byte_size += info.byte_size;
+      type_mismatch |= (info.memory_type == TRITONSERVER_MEMORY_GPU);
     }
   }
 
@@ -569,31 +585,30 @@ GetContiguousInputContent(
     *content = nullptr;
     *content_byte_size = 0;
   } else if ((chunk_count == 1) && !type_mismatch) {
-    TRITONSERVER_MemoryType src_memory_type;
-    int64_t src_memory_type_id;
-    RETURN_IF_ERROR(TRITONBACKEND_InputBufferForHostPolicy(
-        rinput, host_policy_name, 0, (const void**)content, content_byte_size,
-        &src_memory_type, &src_memory_type_id));
+    // Return the cached buffer directly. Since chunk_count == 1,
+    // the first valid buffer found is the only one.
+    for (size_t idx = 0; idx < buffer_count; ++idx) {
+      if (cached_buffers[idx].ptr != nullptr) {
+        *content = static_cast<const char*>(cached_buffers[idx].ptr);
+        *content_byte_size = cached_buffers[idx].byte_size;
+        break;
+      }
+    }
   } else {
     *contiguous_buffer = (char*)malloc(total_byte_size);
 
     size_t offset = 0;
-    for (size_t i = 0; i < chunk_count; i++) {
-      bool cuda_used;
-      TRITONSERVER_MemoryType src_memory_type;
-      int64_t src_memory_type_id;
-      size_t src_byte_size;
-      const void* src_ptr;
+    for (size_t idx = 0; idx < buffer_count; ++idx) {
+      BufferInfo& info = cached_buffers[idx];
+      if (info.ptr == nullptr) continue;
 
-      RETURN_IF_ERROR(TRITONBACKEND_InputBufferForHostPolicy(
-          rinput, host_policy_name, i, &src_ptr, &src_byte_size,
-          &src_memory_type, &src_memory_type_id));
+      bool cuda_used;
       RETURN_IF_ERROR(CopyBuffer(
-          "Contiguous input", src_memory_type, src_memory_type_id,
-          TRITONSERVER_MEMORY_CPU, 0, src_byte_size, src_ptr,
+          "Contiguous input", info.memory_type, info.memory_type_id,
+          TRITONSERVER_MEMORY_CPU, 0, info.byte_size, info.ptr,
           *contiguous_buffer + offset, stream, &cuda_used));
       *cuda_copy |= cuda_used;
-      offset += src_byte_size;
+      offset += info.byte_size;
     }
 
     *content = *contiguous_buffer;
@@ -2157,18 +2172,42 @@ ModelInstanceState::ProcessRequests(
       if (StateForModel()->IsInputRagged(name)) {
         batchn_shape.push_back(0);
         for (size_t idx = 0; idx < request_count; idx++) {
-          TRITONBACKEND_Input* input;
-          RESPOND_AND_SET_NULL_IF_ERROR(
-              &responses[idx],
-              TRITONBACKEND_RequestInput(requests[idx], name, &input));
-          const int64_t* shape;
-          uint32_t dims_count;
-          RESPOND_AND_SET_NULL_IF_ERROR(
-              &responses[idx], TRITONBACKEND_InputProperties(
-                                   input, nullptr, nullptr, &shape, &dims_count,
-                                   nullptr, nullptr));
+          TRITONBACKEND_Input* input = nullptr;
+          const int64_t* shape = nullptr;
+          uint32_t dims_count = 0;
 
-          batchn_shape[0] += GetElementCount(shape, dims_count);
+          // Fast-path lookup by index to avoid O(N) linear search by name
+          auto err = TRITONBACKEND_RequestInputByIndex(
+              requests[idx], input_idx, &input);
+          if (err == nullptr) {
+            const char* prop_name;
+            err = TRITONBACKEND_InputProperties(
+                input, &prop_name, nullptr, &shape, &dims_count, nullptr,
+                nullptr);
+            if ((err != nullptr) || (std::strcmp(name, prop_name) != 0)) {
+              if (err != nullptr) TRITONSERVER_ErrorDelete(err);
+              input = nullptr;
+            }
+          } else {
+            TRITONSERVER_ErrorDelete(err);
+          }
+
+          // Fallback to slow-path if fast-path failed
+          if (input == nullptr) {
+            RESPOND_AND_SET_NULL_IF_ERROR(
+                &responses[idx],
+                TRITONBACKEND_RequestInput(requests[idx], name, &input));
+            if (responses[idx] != nullptr) {
+              RESPOND_AND_SET_NULL_IF_ERROR(
+                  &responses[idx], TRITONBACKEND_InputProperties(
+                                       input, nullptr, nullptr, &shape,
+                                       &dims_count, nullptr, nullptr));
+            }
+          }
+
+          if (responses[idx] != nullptr) {
+            batchn_shape[0] += GetElementCount(shape, dims_count);
+          }
         }
       }
       // The shape for the entire input patch, [total_batch_size, ...]
@@ -2231,26 +2270,50 @@ ModelInstanceState::ProcessRequests(
         const char* host_policy_cstr = HostPolicyName().c_str();
 
         for (size_t idx = 0; idx < request_count; idx++) {
-          TRITONBACKEND_Input* input;
-          RESPOND_AND_SET_NULL_IF_ERROR(
-              &responses[idx],
-              TRITONBACKEND_RequestInput(requests[idx], name, &input));
-          const int64_t* shape;
-          uint32_t dims_count;
-          uint32_t buffer_count;
-          RESPOND_AND_SET_NULL_IF_ERROR(
-              &responses[idx],
-              TRITONBACKEND_InputPropertiesForHostPolicy(
-                  input, host_policy_cstr, nullptr, nullptr, &shape,
-                  &dims_count, nullptr, &buffer_count));
+          TRITONBACKEND_Input* input = nullptr;
+          const int64_t* shape = nullptr;
+          uint32_t dims_count = 0;
+          uint32_t buffer_count = 0;
 
-          const int64_t batch_element_cnt = GetElementCount(shape, dims_count);
+          // Fast-path lookup by index to avoid O(N) linear search by name
+          auto err = TRITONBACKEND_RequestInputByIndex(
+              requests[idx], input_idx, &input);
+          if (err == nullptr) {
+            const char* prop_name;
+            err = TRITONBACKEND_InputPropertiesForHostPolicy(
+                input, host_policy_cstr, &prop_name, nullptr, &shape,
+                &dims_count, nullptr, &buffer_count);
+            if ((err != nullptr) || (std::strcmp(name, prop_name) != 0)) {
+              if (err != nullptr) TRITONSERVER_ErrorDelete(err);
+              input = nullptr;
+            }
+          } else {
+            TRITONSERVER_ErrorDelete(err);
+          }
 
-          cuda_copy |= SetStringInputTensor(
-              tensor, input, name, buffer_count, batch_element_cnt,
-              tensor_offset, &responses[idx], CudaStream(),
-              host_policy_cstr, str_buf_list, str_buf_ptrs, str_buf_lens);
-          tensor_offset += batch_element_cnt;
+          // Fallback to slow-path if fast-path failed
+          if (input == nullptr) {
+            RESPOND_AND_SET_NULL_IF_ERROR(
+                &responses[idx],
+                TRITONBACKEND_RequestInput(requests[idx], name, &input));
+            if (responses[idx] != nullptr) {
+              RESPOND_AND_SET_NULL_IF_ERROR(
+                  &responses[idx],
+                  TRITONBACKEND_InputPropertiesForHostPolicy(
+                      input, host_policy_cstr, nullptr, nullptr, &shape,
+                      &dims_count, nullptr, &buffer_count));
+            }
+          }
+
+          if (responses[idx] != nullptr) {
+            const int64_t batch_element_cnt = GetElementCount(shape, dims_count);
+
+            cuda_copy |= SetStringInputTensor(
+                tensor, input, name, buffer_count, batch_element_cnt,
+                tensor_offset, &responses[idx], CudaStream(), host_policy_cstr,
+                str_buf_list, str_buf_ptrs, str_buf_lens);
+            tensor_offset += batch_element_cnt;
+          }
         }
       }
       // Use the collector for non-STRING datatype...

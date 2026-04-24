@@ -544,6 +544,25 @@ GetContiguousInputContent(
   *cuda_copy = false;
   *contiguous_buffer = nullptr;
 
+  struct BufferInfo {
+    const void* ptr;
+    size_t byte_size;
+    TRITONSERVER_MemoryType memory_type;
+    int64_t memory_type_id;
+  };
+
+  // Caching Optimization: Avoid repeated cross-boundary Triton API calls
+  // (TRITONBACKEND_InputBufferForHostPolicy) by storing buffer metadata in a single
+  // pass. For typical small buffer counts (<= 32), we use a stack-allocated inline
+  // array to prevent dynamic heap allocations entirely. For larger counts, we safely
+  // fall back to a pre-reserved std::vector.
+  constexpr size_t kStackThreshold = 32;
+  BufferInfo inline_buffers[kStackThreshold];
+  std::vector<BufferInfo> fallback_buffers;
+  if (buffer_count > kStackThreshold) {
+    fallback_buffers.reserve(buffer_count - kStackThreshold);
+  }
+
   // Check input buffers to see if data copy is necessary
   size_t chunk_count = 0;
   bool type_mismatch = false;
@@ -559,6 +578,11 @@ GetContiguousInputContent(
         &src_memory_type, &src_memory_type_id));
 
     if (src_ptr != nullptr) {
+      if (chunk_count < kStackThreshold) {
+        inline_buffers[chunk_count] = {src_ptr, src_byte_size, src_memory_type, src_memory_type_id};
+      } else {
+        fallback_buffers.push_back({src_ptr, src_byte_size, src_memory_type, src_memory_type_id});
+      }
       chunk_count++;
       total_byte_size += src_byte_size;
       type_mismatch |= (src_memory_type == TRITONSERVER_MEMORY_GPU);
@@ -569,31 +593,22 @@ GetContiguousInputContent(
     *content = nullptr;
     *content_byte_size = 0;
   } else if ((chunk_count == 1) && !type_mismatch) {
-    TRITONSERVER_MemoryType src_memory_type;
-    int64_t src_memory_type_id;
-    RETURN_IF_ERROR(TRITONBACKEND_InputBufferForHostPolicy(
-        rinput, host_policy_name, 0, (const void**)content, content_byte_size,
-        &src_memory_type, &src_memory_type_id));
+    *content = (const char*)inline_buffers[0].ptr;
+    *content_byte_size = inline_buffers[0].byte_size;
   } else {
     *contiguous_buffer = (char*)malloc(total_byte_size);
 
     size_t offset = 0;
     for (size_t i = 0; i < chunk_count; i++) {
       bool cuda_used;
-      TRITONSERVER_MemoryType src_memory_type;
-      int64_t src_memory_type_id;
-      size_t src_byte_size;
-      const void* src_ptr;
+      const BufferInfo* info = (i < kStackThreshold) ? &inline_buffers[i] : &fallback_buffers[i - kStackThreshold];
 
-      RETURN_IF_ERROR(TRITONBACKEND_InputBufferForHostPolicy(
-          rinput, host_policy_name, i, &src_ptr, &src_byte_size,
-          &src_memory_type, &src_memory_type_id));
       RETURN_IF_ERROR(CopyBuffer(
-          "Contiguous input", src_memory_type, src_memory_type_id,
-          TRITONSERVER_MEMORY_CPU, 0, src_byte_size, src_ptr,
+          "Contiguous input", info->memory_type, info->memory_type_id,
+          TRITONSERVER_MEMORY_CPU, 0, info->byte_size, info->ptr,
           *contiguous_buffer + offset, stream, &cuda_used));
       *cuda_copy |= cuda_used;
-      offset += src_byte_size;
+      offset += info->byte_size;
     }
 
     *content = *contiguous_buffer;

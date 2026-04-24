@@ -54,3 +54,6 @@
 
 ## 2026-03-23 - Revert for regression
 **Learning:** Reverted commits between 2026-03-19 and 2026-03-21. They introduced a prediction performance regression, while did have latency improvements.
+## 2026-04-24 - [Caching buffer iterations to avoid redundant C API calls and heap allocs]
+**Learning:** Found a performance bottleneck where `GetContiguousInputContent` iterated over `buffer_count` using `TRITONBACKEND_InputBufferForHostPolicy` and then redundantly iterated over it again when `chunk_count > 1`, resulting in extra C API cross-boundary overheads in the execution hot-path. The second loop also incorrectly passed the sequence index `i` instead of the original buffer array index `idx` which was previously checked for `src_ptr != nullptr`. This means the loop would have incorrectly mapped inputs if there were `nullptr` elements within the first `buffer_count` items.
+**Action:** Always fuse redundant iterations into a single pass when possible. Here, caching the results of the first API call inside a small stack-allocated `inline_buffers` array allows subsequent passes to avoid API overhead, prevent heap allocations (since typical buffer counts are small), and maintain correct logical mappings safely.

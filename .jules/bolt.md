@@ -54,3 +54,6 @@
 
 ## 2026-03-23 - Revert for regression
 **Learning:** Reverted commits between 2026-03-19 and 2026-03-21. They introduced a prediction performance regression, while did have latency improvements.
+## 2026-05-24 - [Fix Latent Bug and Redundant Loop in GetContiguousInputContent]
+**Learning:** Found a performance bottleneck and a latent bug in `GetContiguousInputContent`. It redundantly invoked the `TRITONBACKEND_InputBufferForHostPolicy` C API twice to evaluate contiguous chunks. Furthermore, the copy iteration loop iterated over `chunk_count` instead of `buffer_count`, which causes erroneous behavior if earlier buffers were `nullptr` and later buffers were valid.
+**Action:** Always cache the buffer properties struct during the first loop validation pass to prevent redundant C API invocations later. Using a stack-allocated buffer (e.g., `BufferInfo[32]`) perfectly optimizes out heap allocations for target high-concurrency batch workloads up to 32 items. Iterate over `buffer_count` when applying operations sequentially.

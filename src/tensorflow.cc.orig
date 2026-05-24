@@ -544,11 +544,6 @@ GetContiguousInputContent(
   *cuda_copy = false;
   *contiguous_buffer = nullptr;
 
-  // BOLT OPTIMIZATION: Cache buffer properties to avoid redundant C API calls
-  // and C API boundary crossing overhead. Use a stack-allocated array for
-  // typical workload batch sizes (<= 32) to prevent heap allocations.
-  // This completely eliminates redundant loop passes for properties querying.
-
   struct BufferInfo {
     const void* ptr;
     size_t byte_size;
@@ -596,8 +591,6 @@ GetContiguousInputContent(
     *contiguous_buffer = (char*)malloc(total_byte_size);
 
     size_t offset = 0;
-    // Iterate over buffer_count and explicitly skip null buffers to handle
-    // sparse mappings correctly, rather than relying on chunk_count as an index.
     for (size_t i = 0; i < buffer_count; i++) {
       if (buffers[i].ptr == nullptr) {
         continue;
